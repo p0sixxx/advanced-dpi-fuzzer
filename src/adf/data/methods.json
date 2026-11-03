@@ -1,0 +1,381 @@
+{
+  "version": 1,
+  "notes": "Every engine entry lists the exact syntax accepted by that engine and the source it was verified against. status: 'source' = present in engine source code; 'changelog' = documented in release notes only, must be confirmed on the binary with 'adf-agent caps'; 'absent' = not supported.",
+  "methods": [
+    {
+      "id": "tcp.split",
+      "name": "TCP segmentation (split)",
+      "category": "tcp",
+      "protocols": ["tls", "http"],
+      "description": "Send the first payload (ClientHello / HTTP request) as two TCP segments split at a position; stateless DPI that inspects only one segment misses the hostname.",
+      "engines": {
+        "tachyon_desync": {"status": "source", "syntax": "mode=split split_pos=<pos>", "ref": "tachyon-core crates/core-runtime/src/outbound/desync/engine.rs (DesyncMode::Split)"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync=multisplit --dpi-desync-split-pos=<markers>", "ref": "zapret docs/readme.en.md --dpi-desync"},
+        "zapret2": {"status": "source", "syntax": "--lua-desync=multisplit:pos=<markers>", "ref": "zapret2 lua/zapret-antidpi.lua multisplit()"},
+        "byedpi": {"status": "source", "syntax": "-s <pos_t>", "ref": "byedpi README.md --split"}
+      },
+      "limitations": "Ineffective against DPI with TCP reassembly.",
+      "known_issues": []
+    },
+    {
+      "id": "tcp.multisplit",
+      "name": "Multi-point split",
+      "category": "tcp",
+      "protocols": ["tls", "http"],
+      "description": "Split the payload at several positions (e.g. 1,sniext+1,midsld).",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "mode=multi_split split_pos=1,sniext+1,midsld", "ref": "tachyon-core CHANGELOG 0.3.0 (split_pos array); tachyon L/config/connections.uc norm_split_pos"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync=multisplit --dpi-desync-split-pos=1,midsld", "ref": "zapret docs/readme.en.md"},
+        "zapret2": {"status": "source", "syntax": "--lua-desync=multisplit:pos=1,midsld", "ref": "zapret2 docs/manual.en.md ### multisplit"},
+        "byedpi": {"status": "source", "syntax": "-s 1 -s 0+sm (option repeated)", "ref": "byedpi README.md --split"}
+      },
+      "limitations": "More segments = more chances for middlebox reassembly issues.",
+      "known_issues": []
+    },
+    {
+      "id": "tcp.disorder",
+      "name": "Disorder (out-of-order segments)",
+      "category": "tcp",
+      "protocols": ["tls", "http"],
+      "description": "Send segments in reverse order. tachyon-core implements it as first segment with TTL=1 (dropped, then retransmitted by the kernel after the second one).",
+      "engines": {
+        "tachyon_desync": {"status": "source", "syntax": "mode=disorder split_pos=<pos>", "ref": "engine.rs DesyncMode::Disorder (TTL=1 first fragment)"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync=multidisorder --dpi-desync-split-pos=<markers>", "ref": "zapret docs/readme.en.md"},
+        "zapret2": {"status": "source", "syntax": "--lua-desync=multidisorder:pos=<markers>", "ref": "zapret2 manual ### multidisorder"},
+        "byedpi": {"status": "source", "syntax": "-d <pos_t>", "ref": "byedpi README.md --disorder"}
+      },
+      "limitations": "TTL=1 variant costs one retransmission timeout on lossy links (adds ~RTO latency).",
+      "known_issues": []
+    },
+    {
+      "id": "tcp.multidisorder",
+      "name": "Multi-disorder (fake + multi-segment reverse order)",
+      "category": "tcp",
+      "protocols": ["tls", "http"],
+      "description": "Combined multi-segment mode sending ClientHello parts in reverse order with fakes.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "mode=multi_disorder split_pos=<list>", "ref": "tachyon-core CHANGELOG 0.3.0 'MultiDisorder (fakeddisorder)'"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync=fakeddisorder --dpi-desync-split-pos=<pos>", "ref": "zapret docs/readme.en.md fakeddisorder"},
+        "zapret2": {"status": "source", "syntax": "--lua-desync=fakeddisorder:pos=<pos>", "ref": "zapret2 manual ### fakeddisorder"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "",
+      "known_issues": ["Tachyon fuzzer normalizes mode=multidisorder to fake_disorder (fuzzer_runner.uc:133-151) while UCI maps it to multi_disorder."]
+    },
+    {
+      "id": "tcp.fakedsplit",
+      "name": "Faked split",
+      "category": "tcp",
+      "protocols": ["tls", "http"],
+      "description": "Each real segment is preceded by a fake segment of the same size and sequence range.",
+      "engines": {
+        "tachyon_desync": {"status": "absent", "syntax": "", "ref": ""},
+        "zapret": {"status": "source", "syntax": "--dpi-desync=fakedsplit --dpi-desync-split-pos=<pos>", "ref": "zapret docs/readme.en.md"},
+        "zapret2": {"status": "source", "syntax": "--lua-desync=fakedsplit:pos=<pos>", "ref": "zapret2 manual ### fakedsplit"},
+        "byedpi": {"status": "source", "syntax": "-f <pos_t>", "ref": "byedpi README.md --fake"}
+      },
+      "limitations": "Requires a fooling method so fakes do not reach the server.",
+      "known_issues": []
+    },
+    {
+      "id": "tcp.hostfakesplit",
+      "name": "Host fake split",
+      "category": "tcp",
+      "protocols": ["tls", "http"],
+      "description": "Only the hostname part is faked: before-host, fake host, real host (optionally split), fake host repeat, after-host.",
+      "engines": {
+        "tachyon_desync": {"status": "absent", "syntax": "", "ref": ""},
+        "zapret": {"status": "source", "syntax": "--dpi-desync=hostfakesplit [--dpi-desync-hostfakesplit-mod=host=<h>] [--dpi-desync-hostfakesplit-midhost=<marker>]", "ref": "zapret docs/readme.en.md"},
+        "zapret2": {"status": "source", "syntax": "--lua-desync=hostfakesplit[:host=<h>][:midhost=<marker>]", "ref": "zapret2 manual ### hostfakesplit"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "",
+      "known_issues": []
+    },
+    {
+      "id": "tcp.seqovl",
+      "name": "TCP sequence overlap",
+      "category": "tcp",
+      "protocols": ["tls", "http"],
+      "description": "First sent segment starts N bytes earlier (seq-N) and the overlap is filled with a pattern; the server keeps the first-arrived bytes, DPI may keep the pattern.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "seqovl=<N>", "ref": "tachyon-core CHANGELOG 0.3.0; tachyon connections.uc desync_seqovl"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync-split-seqovl=<N|marker> [--dpi-desync-split-seqovl-pattern=...]", "ref": "zapret docs/readme.en.md"},
+        "zapret2": {"status": "source", "syntax": ":seqovl=<posmarker>[:seqovl_pattern=<blob>]", "ref": "zapret2 lua/zapret-antidpi.lua multisplit"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "N must be less than the first split position.",
+      "known_issues": []
+    },
+    {
+      "id": "tcp.oob",
+      "name": "TCP urgent / OOB byte",
+      "category": "tcp",
+      "protocols": ["tls", "http"],
+      "description": "Insert one urgent (MSG_OOB) byte; servers following RFC 6093 strip it, some DPI does not.",
+      "engines": {
+        "tachyon_desync": {"status": "source", "syntax": "mode=oob split_pos=<pos>", "ref": "engine.rs DesyncMode::Oob (libc::send MSG_OOB)"},
+        "zapret": {"status": "absent", "syntax": "", "ref": ""},
+        "zapret2": {"status": "source", "syntax": "--lua-desync=oob", "ref": "zapret2 manual ### oob"},
+        "byedpi": {"status": "source", "syntax": "-o <pos_t> | -q <pos_t>", "ref": "byedpi README.md --oob/--disoob"}
+      },
+      "limitations": "Breaks servers that do not strip urgent data.",
+      "known_issues": []
+    },
+    {
+      "id": "tcp.syndata",
+      "name": "SYN data",
+      "category": "tcp",
+      "protocols": ["tls", "http"],
+      "description": "Payload in the SYN packet; servers without TFO ignore it, DPI may parse it.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "syndata=true", "ref": "tachyon-core CHANGELOG 0.3.0"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync=syndata", "ref": "zapret docs/readme.en.md"},
+        "zapret2": {"status": "source", "syntax": "--lua-desync=syndata[:blob=<blob>]", "ref": "zapret2 manual ### syndata"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "",
+      "known_issues": []
+    },
+    {
+      "id": "tcp.wsize",
+      "name": "TCP window clamp",
+      "category": "tcp",
+      "protocols": ["tls", "http"],
+      "description": "Advertise a tiny window in SYN-ACK handling so the client segments the ClientHello itself.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "wsize=<N>", "ref": "tachyon-core CHANGELOG 0.3.0"},
+        "zapret": {"status": "source", "syntax": "--wsize=<N>", "ref": "zapret docs/readme.en.md"},
+        "zapret2": {"status": "source", "syntax": "--lua-desync=wsize:wsize=<N>", "ref": "zapret2 manual ### wsize"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "Slows the handshake.",
+      "known_issues": []
+    },
+    {
+      "id": "tls.record_split",
+      "name": "TLS record fragmentation",
+      "category": "tls",
+      "protocols": ["tls"],
+      "description": "Split the ClientHello handshake message into two TLS records (RFC-compliant).",
+      "engines": {
+        "tachyon_desync": {"status": "source", "syntax": "mode=tlsrec split_pos=<pos>", "ref": "engine.rs DesyncMode::TlsRec"},
+        "zapret": {"status": "source", "syntax": "tpws --tlsrec=<marker> (nfqws: n/a)", "ref": "zapret docs/readme.en.md --tlsrec"},
+        "zapret2": {"status": "source", "syntax": "--lua-desync=tls_client_hello_clone / multisplit over records", "ref": "zapret2 manual"},
+        "byedpi": {"status": "source", "syntax": "-r <pos_t>", "ref": "byedpi README.md --tlsrec"}
+      },
+      "limitations": "Some old TLS stacks reject fragmented ClientHello.",
+      "known_issues": []
+    },
+    {
+      "id": "fake.tls_clienthello",
+      "name": "Fake TLS ClientHello",
+      "category": "fake",
+      "protocols": ["tls"],
+      "description": "Inject a decoy ClientHello (whitelisted SNI) that DPI processes but the server drops (via TTL or fooling).",
+      "engines": {
+        "tachyon_desync": {"status": "source", "syntax": "mode=fake|fake_split|fake_disorder fake_sni=<host> fake_ttl=<n> repeats=<n>", "ref": "engine.rs DesyncMode::Fake/FakeSplit; payload.rs build_fake_tls_client_hello"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync=fake --dpi-desync-fake-tls=<file> --dpi-desync-fake-tls-mod=sni=<h>", "ref": "zapret docs/readme.en.md"},
+        "zapret2": {"status": "source", "syntax": "--lua-desync=fake:blob=<blob>[:tls_mod=sni=<h>]", "ref": "zapret2 manual ### fake"},
+        "byedpi": {"status": "source", "syntax": "-f <pos_t> -n <sni> -t <ttl>", "ref": "byedpi README.md --fake/--fake-sni"}
+      },
+      "limitations": "Without fooling or correct TTL the fake reaches the server and breaks the handshake.",
+      "known_issues": []
+    },
+    {
+      "id": "fool.ttl",
+      "name": "Low TTL / hop limit for fakes",
+      "category": "fooling",
+      "protocols": ["tcp", "udp"],
+      "description": "Fake expires after passing DPI but before the server.",
+      "engines": {
+        "tachyon_desync": {"status": "source", "syntax": "fake_ttl=<1..128> udp_fake_ttl=<n>", "ref": "config.rs fake_ttl"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync-ttl=<n> --dpi-desync-ttl6=<n>", "ref": "zapret docs/readme.en.md"},
+        "zapret2": {"status": "source", "syntax": ":ip_ttl=<n>:ip6_ttl=<n>", "ref": "zapret2 manual standard fooling"},
+        "byedpi": {"status": "source", "syntax": "-t <n>", "ref": "byedpi README.md --ttl"}
+      },
+      "limitations": "Route-dependent; must be re-tuned when the route changes.",
+      "known_issues": []
+    },
+    {
+      "id": "fool.autottl",
+      "name": "Auto TTL",
+      "category": "fooling",
+      "protocols": ["tcp"],
+      "description": "TTL derived from the server's incoming TTL (hop distance) minus delta.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "fooling=autottl", "ref": "tachyon UI 'Auto-TTL (Calculated from kernel RTT hops)'; connections.uc norm_fooling"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync-autottl=<delta>[:<min>-<max>]", "ref": "zapret docs/readme.en.md"},
+        "zapret2": {"status": "source", "syntax": ":ip_autottl=<delta>,<min>-<max>", "ref": "zapret2 manual standard fooling"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "",
+      "known_issues": []
+    },
+    {
+      "id": "fool.md5sig",
+      "name": "TCP MD5 signature option",
+      "category": "fooling",
+      "protocols": ["tcp"],
+      "description": "Linux servers drop segments with an unexpected MD5 option (RFC 2385); DPI usually ignores it.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "fooling=md5", "ref": "tachyon UI 'TCP MD5 Signature (Option 19 via TCP_REPAIR)'"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync-fooling=md5sig", "ref": "zapret nfq/nfqws.c parse_fooling"},
+        "zapret2": {"status": "source", "syntax": ":tcp_md5", "ref": "zapret2 lua/zapret-lib.lua apply_fooling"},
+        "byedpi": {"status": "source", "syntax": "-S", "ref": "byedpi README.md --md5sig"}
+      },
+      "limitations": "Windows/BSD servers may accept the segment; some middleboxes strip options.",
+      "known_issues": []
+    },
+    {
+      "id": "fool.badack",
+      "name": "Out-of-window ACK",
+      "category": "fooling",
+      "protocols": ["tcp"],
+      "description": "Fake segment ACK number shifted out of window.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "fooling=badack | fooling=md5_badack", "ref": "tachyon-core CHANGELOG 0.3.0 'BadAck'"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync-fooling=badseq --dpi-desync-badack-increment=<n> (no 'badack' fooling keyword!)", "ref": "zapret nfq/nfqws.c parse_fooling accepts: none md5sig ts badsum badseq datanoack hopbyhop hopbyhop2"},
+        "zapret2": {"status": "source", "syntax": ":tcp_ack=-66000[:tcp_ts_up]", "ref": "zapret2 manual standard fooling"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "Linux drops it reliably only when the timestamp option is first (tcp_ts_up).",
+      "known_issues": ["Tachyon generator emits '--dpi-desync-fooling=badack' for nfqws v1 which nfqws rejects (strategies.uc:51)."]
+    },
+    {
+      "id": "fool.badseq",
+      "name": "Bad sequence number",
+      "category": "fooling",
+      "protocols": ["tcp"],
+      "description": "Fake segment seq shifted so the server discards it.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "fooling=badseq", "ref": "tachyon UI desync_fooling"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync-fooling=badseq [--dpi-desync-badseq-increment=<n>]", "ref": "zapret nfqws.c"},
+        "zapret2": {"status": "source", "syntax": ":tcp_seq=<offset>", "ref": "zapret2 manual standard fooling"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "",
+      "known_issues": []
+    },
+    {
+      "id": "fool.badsum",
+      "name": "Bad L4 checksum",
+      "category": "fooling",
+      "protocols": ["tcp", "udp"],
+      "description": "Fake with invalid checksum; dropped by the server stack, often not validated by DPI.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "fooling=badsum", "ref": "tachyon UI desync_fooling"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync-fooling=badsum", "ref": "zapret nfqws.c"},
+        "zapret2": {"status": "source", "syntax": ":badsum", "ref": "zapret2 lua/zapret-lib.lua reconstruct_opts"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "NAT devices that recompute checksums neutralise it (common on home routers behind CGNAT).",
+      "known_issues": []
+    },
+    {
+      "id": "fool.timestamp",
+      "name": "Backdated TCP timestamp (PAWS)",
+      "category": "fooling",
+      "protocols": ["tcp"],
+      "description": "TSval in the past; server rejects by PAWS (RFC 7323).",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "fooling=timestamp", "ref": "tachyon UI 'TCP Timestamp PAWS'"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync-fooling=ts [--dpi-desync-ts-increment=<n>]", "ref": "zapret nfqws.c"},
+        "zapret2": {"status": "source", "syntax": ":tcp_ts=-600000", "ref": "zapret2 manual standard fooling"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "Requires timestamps negotiated on the connection.",
+      "known_issues": []
+    },
+    {
+      "id": "fool.datanoack",
+      "name": "Data without ACK flag",
+      "category": "fooling",
+      "protocols": ["tcp"],
+      "description": "Fake data segment with ACK cleared; servers drop it.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "fooling=datanoack", "ref": "tachyon UI desync_fooling"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync-fooling=datanoack", "ref": "zapret nfqws.c"},
+        "zapret2": {"status": "source", "syntax": ":tcp_flags_unset=ack", "ref": "zapret2 manual standard fooling"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "Breaks through NAT that drops non-ACK data segments.",
+      "known_issues": []
+    },
+    {
+      "id": "fool.combo",
+      "name": "Compound badseq + badack + ts_up + badsum",
+      "category": "fooling",
+      "protocols": ["tcp"],
+      "description": "Several fooling methods applied together to the same fake.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "fooling=badseq_badack_badsum", "ref": "tachyon UI desync_fooling"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync-fooling=badseq,badsum", "ref": "zapret nfqws.c (comma list)"},
+        "zapret2": {"status": "source", "syntax": ":tcp_seq=1000000:tcp_ack=-66000:tcp_ts_up:badsum", "ref": "zapret2 manual standard fooling"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "",
+      "known_issues": []
+    },
+    {
+      "id": "fool.ipv6_hopbyhop",
+      "name": "IPv6 Hop-by-Hop extension header",
+      "category": "fooling",
+      "protocols": ["ipv6"],
+      "description": "Extension header(s) that the server drops (two HbH headers are invalid per RFC 8200) while DPI parses the payload.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "fooling=hopbyhop", "ref": "tachyon-core CHANGELOG 0.3.0 'IPv6 HopByHop'"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync-fooling=hopbyhop|hopbyhop2", "ref": "zapret nfqws.c"},
+        "zapret2": {"status": "source", "syntax": ":ip6_hopbyhop | :ip6_hopbyhop2", "ref": "zapret2 manual standard fooling"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "IPv6 only. Meaningless (must not be tested) on IPv4 paths.",
+      "known_issues": []
+    },
+    {
+      "id": "ip.frag",
+      "name": "IP fragmentation",
+      "category": "ip",
+      "protocols": ["ipv4", "ipv6", "udp", "tcp"],
+      "description": "Fragment the IP datagram carrying the first payload.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "ipfrag=true", "ref": "tachyon-core CHANGELOG 0.3.0"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync=ipfrag2 [--dpi-desync-ipfrag-pos-tcp=<8..>]", "ref": "zapret docs/readme.en.md"},
+        "zapret2": {"status": "source", "syntax": ":ipfrag[=ipfrag2][:ipfrag_pos_tcp=<n>][:ipfrag_disorder]", "ref": "zapret2 manual standard ipfrag"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "Fragments are often dropped by CGNAT/firewalls.",
+      "known_issues": []
+    },
+    {
+      "id": "udp.quic_fake",
+      "name": "Fake QUIC Initial / UDP fake burst",
+      "category": "udp",
+      "protocols": ["quic", "udp"],
+      "description": "Low-TTL fake QUIC Initial / STUN packets before real UDP traffic.",
+      "engines": {
+        "tachyon_desync": {"status": "source", "syntax": "udp_fake=true udp_repeats=<n> udp_fake_ttl=<n>", "ref": "engine.rs apply_desync_udp"},
+        "zapret": {"status": "source", "syntax": "--filter-udp=443 --dpi-desync=fake --dpi-desync-repeats=<n>", "ref": "zapret docs/readme.en.md"},
+        "zapret2": {"status": "source", "syntax": "--filter-udp=443 --lua-desync=fake:blob=quic_google:repeats=<n>", "ref": "zapret2 manual ### fake"},
+        "byedpi": {"status": "source", "syntax": "-a <count>", "ref": "byedpi README.md --udp-fake"}
+      },
+      "limitations": "Only measurable with an HTTP/3-capable probe (curl --http3-only). TCP probes say nothing about it.",
+      "known_issues": []
+    },
+    {
+      "id": "udp.udplen",
+      "name": "UDP length manipulation",
+      "category": "udp",
+      "protocols": ["quic", "udp"],
+      "description": "Pad UDP payload so length-based QUIC classifiers fail.",
+      "engines": {
+        "tachyon_desync": {"status": "changelog", "syntax": "udplen=<n>", "ref": "tachyon-core CHANGELOG 0.3.0"},
+        "zapret": {"status": "source", "syntax": "--dpi-desync=udplen --dpi-desync-udplen-increment=<n>", "ref": "zapret docs/readme.en.md"},
+        "zapret2": {"status": "source", "syntax": "--lua-desync=udplen:increment=<n>", "ref": "zapret2 manual ### udplen"},
+        "byedpi": {"status": "absent", "syntax": "", "ref": ""}
+      },
+      "limitations": "",
+      "known_issues": []
+    }
+  ]
+}
