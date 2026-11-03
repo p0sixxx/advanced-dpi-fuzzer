@@ -249,3 +249,38 @@ def test_compare_current_section(tmp_path, capsys):
                  "--no-adaptive", "--reps", "3", "--only", "youtube-www"]) == 0
     out = capsys.readouterr().out
     assert "current: yt" in out and "current: dc" in out and "СИМУЛЯЦИЯ" in out
+
+
+def test_ssh_transport_sends_lf_and_runs_agent(tmp_path):
+    """A fake `ssh` executes the remote command locally: checks upload, BatchMode and LF-only streams."""
+    import shutil as _sh
+    import sys as _sys
+    from adf.probe.backend import AGENT_PATH, SSHTransport
+    log = tmp_path / "ssh.log"
+    fake = tmp_path / "ssh"
+    fake.write_text(f"""#!{_sys.executable}
+import subprocess, sys
+args = sys.argv[1:]
+open({str(log)!r}, "a").write(repr(args) + "\\n")
+assert "BatchMode=yes" in args
+remote = args[-1]
+data = sys.stdin.buffer.read()
+assert b"\\r" not in data, "CR sent to router"
+sys.exit(subprocess.run(["sh", "-c", remote], input=data).returncode)
+""")
+    fake.chmod(0o755)
+    crlf = tmp_path / "agent_crlf.sh"
+    crlf.write_bytes(AGENT_PATH.read_bytes().replace(b"\n", b"\r\n"))
+    remote_agent = tmp_path / "remote-agent.sh"
+    t = SSHTransport(host="192.0.2.1", ssh=str(fake), identity="~/.ssh/none", remote_agent=str(remote_agent))
+    t.install(crlf)
+    assert b"\r" not in remote_agent.read_bytes()
+    assert t.call(["version"]).strip() == "0.1.0"
+    assert "~" not in log.read_text()  # identity path expanded
+    assert _sh.which("sh")
+
+
+def test_fakeip_answers_are_discarded():
+    from adf.probe.backend import usable_addresses
+    assert usable_addresses(["198.18.0.5", "142.250.74.14", "fc00::12", "2a00:1450:4010:c0e::5d", "10.0.0.1",
+                             "garbage", "127.0.0.1"]) == ["142.250.74.14", "2a00:1450:4010:c0e::5d"]

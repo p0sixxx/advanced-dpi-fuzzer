@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import random
@@ -29,6 +30,18 @@ TACHYON_BYPASS_MARK = 0x08000000  # NFT_OUTBOUND_MARK in Tachyon (service/lifecy
 
 class BackendError(RuntimeError):
     pass
+
+
+def _run(cmd: Sequence[str], stdin: str, timeout: float, env: Optional[Dict[str, str]] = None):
+    """Run with *binary* pipes: LF line endings and UTF-8 on every OS.
+
+    Text-mode pipes on Windows translate "\n" to "\r\n", which would corrupt the
+    agent script and the job protocol sent to the router.
+    """
+    p = subprocess.run(list(cmd), input=stdin.replace("\r\n", "\n").encode("utf-8"), capture_output=True,
+                       timeout=timeout, env=env)
+    return subprocess.CompletedProcess(p.args, p.returncode, p.stdout.decode("utf-8", "replace"),
+                                       p.stderr.decode("utf-8", "replace"))
 
 
 # ---------------------------------------------------------------- transports
@@ -51,9 +64,7 @@ class LocalTransport(Transport):
         if self.env:
             env.update(self.env)
         try:
-            p = subprocess.run([*shlex.split(self.interpreter), self.agent, *args], input=stdin, capture_output=True,
-                               text=True,
-                               timeout=timeout, env=env)
+            p = _run([*shlex.split(self.interpreter), self.agent, *args], stdin, timeout, env)
         except subprocess.TimeoutExpired as e:
             raise BackendError(f"agent timed out after {timeout}s") from e
         if p.returncode not in (0,):
@@ -62,7 +73,7 @@ class LocalTransport(Transport):
         return p.stdout
 
     def shell(self, cmd: str, stdin: str = "", timeout: float = 120) -> str:
-        p = subprocess.run(["sh", "-c", cmd], input=stdin, capture_output=True, text=True, timeout=timeout)
+        p = _run(["sh", "-c", cmd], stdin, timeout)
         if p.returncode != 0:
             raise BackendError(f"command failed (rc={p.returncode}): {p.stderr.strip()[:500]}")
         return p.stdout
@@ -90,23 +101,24 @@ class SSHTransport(Transport):
     def _base(self) -> List[str]:
         cmd = [self.ssh, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-p", str(self.port)]
         if self.identity:
-            cmd += ["-i", self.identity]
+            cmd += ["-i", str(Path(self.identity).expanduser())]
         cmd += list(self.extra_opts)
         cmd.append(f"{self.user}@{self.host}")
         return cmd
 
     def install(self, local_agent: Path = AGENT_PATH, timeout: float = 60) -> None:
         """Copy the agent to ``remote_agent`` (tmpfs by default: nothing persists)."""
-        script = Path(local_agent).read_text(encoding="utf-8")
+        # strip CR: a Windows checkout may have converted the script to CRLF
+        script = Path(local_agent).read_bytes().decode("utf-8").replace("\r\n", "\n")
         cmd = self._base() + [f"cat > {shlex.quote(self.remote_agent)} && chmod 700 {shlex.quote(self.remote_agent)}"]
-        p = subprocess.run(cmd, input=script, capture_output=True, text=True, timeout=timeout)
+        p = _run(cmd, script, timeout)
         if p.returncode != 0:
             raise BackendError(f"agent install failed: {p.stderr.strip()[:500]}")
 
     def call(self, args: Sequence[str], stdin: str = "", timeout: float = 600) -> str:
         remote = "sh " + shlex.quote(self.remote_agent) + " " + " ".join(shlex.quote(a) for a in args)
         try:
-            p = subprocess.run(self._base() + [remote], input=stdin, capture_output=True, text=True, timeout=timeout)
+            p = _run(self._base() + [remote], stdin, timeout)
         except subprocess.TimeoutExpired as e:
             raise BackendError(f"ssh agent call timed out after {timeout}s") from e
         if p.returncode != 0:
@@ -114,13 +126,33 @@ class SSHTransport(Transport):
         return p.stdout
 
     def shell(self, cmd: str, stdin: str = "", timeout: float = 120) -> str:
-        p = subprocess.run(self._base() + [cmd], input=stdin, capture_output=True, text=True, timeout=timeout)
+        p = _run(self._base() + [cmd], stdin, timeout)
         if p.returncode != 0:
             raise BackendError(f"ssh command failed (rc={p.returncode}): {p.stderr.strip()[:500]}")
         return p.stdout
 
     def describe(self) -> str:
         return f"ssh:{self.user}@{self.host}:{self.port}"
+
+
+# sing-box / tachyon-core default FakeIP pools; answers from them (or private/loopback
+# addresses) mean the router's DNS was intercepted and cannot be used with --resolve.
+_FAKEIP = (ipaddress.ip_network("198.18.0.0/15"), ipaddress.ip_network("fc00::/18"))
+
+
+def usable_addresses(lines: Sequence[str]) -> List[str]:
+    out = []
+    for line in lines:
+        try:
+            ip = ipaddress.ip_address(line.strip())
+        except ValueError:
+            continue
+        if any(ip in n for n in _FAKEIP if n.version == ip.version):
+            continue
+        if ip.is_private or ip.is_loopback or ip.is_unspecified or ip.is_link_local:
+            continue
+        out.append(str(ip))
+    return out
 
 
 def parse_lines(text: str) -> List[Dict[str, Any]]:
@@ -245,7 +277,7 @@ class AgentBackend(Backend):
 
     def resolve(self, host: str) -> List[str]:
         out = self.transport.call(["resolve", host, self.settings.dns_server], timeout=30)
-        return [l.strip() for l in out.splitlines() if l.strip()]
+        return usable_addresses(out.splitlines())
 
     def run_batch(self, engine: Engine, params: Optional[Mapping[str, Any]], targets: Sequence[Target],
                   ips: Mapping[str, Sequence[str]], reps: int = 1, stop_on_fail: bool = False) -> BatchResult:
