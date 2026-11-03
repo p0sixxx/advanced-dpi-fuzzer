@@ -1,0 +1,61 @@
+# Target list. Fields: id, url, category, name, required, kind (https|streaming|quic),
+# min_bytes, range, ok_codes, body_regex (no spaces), min_speed_kbps, families, max_ips.
+# A strategy is judged by its worst *required* target.
+
+[[target]]
+id = "youtube-www"
+url = "https://www.youtube.com/"
+category = "youtube"
+min_bytes = 65536
+body_regex = "ytcfg"
+
+[[target]]
+id = "youtube-video"
+url = "https://rr1.googlevideo.com/videoplayback"
+category = "youtube"
+kind = "streaming"
+range = "0-65535"
+required = false
+
+[[target]]
+id = "ytmusic-www"
+url = "https://music.youtube.com/"
+category = "youtube_music"
+min_bytes = 32768
+
+[[target]]
+id = "discord-www"
+url = "https://discord.com/"
+category = "discord"
+min_bytes = 32768
+body_regex = "discord"
+
+[[target]]
+id = "telegram-web"
+url = "https://web.telegram.org/"
+category = "telegram"
+body_regex = "[Tt]elegram"
+
+[[target]]
+id = "github-www"
+url = "https://github.com/"
+category = "github"
+min_bytes = 65536
+
+[[target]]
+id = "cloudflare-100k"
+url = "https://speed.cloudflare.com/__down?bytes=102400"
+category = "cloudflare"
+min_bytes = 102400
+families = ["ipv4", "ipv6"]
+
+# Controls must work WITHOUT any bypass; a failing control means the network is down.
+[[control]]
+id = "control-ya"
+url = "https://ya.ru/"
+category = "control"
+
+[[control]]
+id = "control-vk"
+url = "https://vk.com/"
+category = "control"

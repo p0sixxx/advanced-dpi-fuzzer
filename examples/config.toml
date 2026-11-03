@@ -1,0 +1,31 @@
+# Advanced DPI Fuzzer configuration example.
+# Copy to config.local.toml (ignored by git) and adjust. Secrets are not allowed here:
+# SSH uses your keys / ssh-agent.
+
+[router]
+host = "192.168.8.1"        # GL.iNet default LAN address
+user = "root"
+port = 22
+# identity = "~/.ssh/id_ed25519_flint2"
+remote_agent = "/tmp/adf-agent.sh"
+
+[probe]
+port = 11290                # localhost port of the temporary engine
+timeout_s = 8
+connect_timeout_s = 4
+interval_ms = 250           # pause between requests
+routing_mark = 134217728    # 0x08000000: Tachyon's bypass mark (NFT_OUTBOUND_MARK)
+dns_server = "77.88.8.8"    # resolver used for CDN IPs (same as Tachyon's fuzzer)
+
+[search]
+network_id = "home-isp"     # results are kept per network/ISP
+engine = "tachyon_desync"
+max_batches = 400
+max_probes = 6000
+max_minutes = 180
+min_batch_interval_s = 1.0
+categories = ["youtube", "discord", "google", "github"]
+
+[paths]
+db = "~/.adf/adf.sqlite"
+targets = "targets.toml"

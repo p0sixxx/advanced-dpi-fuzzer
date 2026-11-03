@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install tools
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q busybox shellcheck curl openssl
+      - name: Install package
+        run: python -m pip install -e '.[dev]'
+      - name: Shellcheck agent
+        run: shellcheck -s sh -S warning agent/adf-agent.sh
+      - name: Tests (unit + agent e2e under dash and busybox ash)
+        run: python -m pytest -q
+      - name: Simulator benchmark smoke
+        run: adf bench --seeds 1,2 --targets-n 4

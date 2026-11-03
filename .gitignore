@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+build/
+dist/
+.venv/
+venv/
+# local data: results, backups, private configs
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.bak
+*.jsonl
+local/
+config.local.toml
+reports/
