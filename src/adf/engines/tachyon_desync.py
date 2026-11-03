@@ -132,6 +132,10 @@ UDP_KEYS = frozenset({"udp_fake", "udp_repeats", "udp_fake_ttl", "udplen"})
 # fake_ttl / repeats / split_delay_ms are always explicit: core and UI defaults differ.
 OMIT_WHEN_OFF = frozenset({"fooling", "fake_sni", "seqovl", "syndata", "wsize", "ipfrag", "tlsrec_first", "udplen"})
 
+# tachyon-core values for keys a strategy string leaves out (public source config.rs ``Default``).
+# A missing key is *not* "off": the core applies these. ADF's own strings always state them.
+CORE_DEFAULTS = {"split_pos": "midsld", "fake_ttl": 6, "repeats": 1, "split_delay_ms": 1}
+
 PROFILE_PUBLIC_SOURCE = "tachyon-core-public-source"
 PROFILE_BINARY_03 = "tachyon-core-0.3"
 
@@ -292,11 +296,12 @@ class TachyonDesync(Engine):
         delay = params.get("split_delay_ms")
         if delay is not None and not 0 <= int(delay) <= 1000:
             return "split_delay_ms outside 0..1000"
+        # Assumption (zapret semantics): disorder variants need seqovl < first split position.
         seqovl = int(params.get("seqovl", 0) or 0)
-        if seqovl and pos is not None:
+        if seqovl and pos is not None and "disorder" in str(mode):
             first = _first_numeric_pos(pos)
             if first is not None and seqovl >= first:
-                return "seqovl must be smaller than the first split position"
+                return "disorder: seqovl must be smaller than the first split position"
         sni = params.get("fake_sni", "")
         if sni and sni != "rndsni" and not re.fullmatch(r"[a-z0-9.-]{1,253}", sni):
             return f"invalid fake_sni '{sni}'"
@@ -343,6 +348,8 @@ class TachyonDesync(Engine):
             params[key] = self.normalize_value(key, value)
         if "mode" not in params:
             raise StrategyError("strategy has no mode")
+        for key, value in CORE_DEFAULTS.items():
+            params.setdefault(key, value)
         return params
 
     def outbound(self, params: Mapping[str, Any], tag: str = "adf-desync", routing_mark: Optional[int] = None,

@@ -51,7 +51,7 @@ def test_desync_canonical_equivalence():
     ("mode=multi_split split_pos=midsld", "at least two"),
     ("mode=fake_split split_pos=sld+3", "not understood"),
     ("mode=fake_split fooling=hopbyhop", "IPv6-only"),
-    ("mode=split split_pos=2 seqovl=4", "seqovl must be smaller"),
+    ("mode=disorder split_pos=2 seqovl=4", "seqovl must be smaller"),
     ("mode=bogus", "unknown mode"),
     ("mode=fake_split udp_fake=1", "UDP parameters"),
 ])
@@ -149,3 +149,19 @@ def test_strategy_ids_are_stable():
     a = from_text(eng, "mode=fake_split split_pos=1 fake_ttl=6 repeats=6")
     b = from_text(eng, "repeats=6 fake_ttl=6 split_pos=1 mode=fakesplit")
     assert a.id == b.id and a.text == b.text
+
+
+def test_seqovl_rules_follow_upstream():
+    # nfqws2 multisplit prepends seqovl bytes of any size; only multidisorder needs seqovl < first pos
+    z2 = Zapret2()
+    s = from_text(z2, "--lua-desync=fake:blob=tls_google:repeats=8:tcp_ts=-600000:tcp_ts_up "
+                      "--lua-desync=multisplit:pos=1:seqovl=681:seqovl_pattern=tls_google")
+    assert s.params["fooling"] == "ts_up" and s.params["seqovl"] == 681
+    assert "seqovl_pattern=tls_google" in s.text
+    with pytest.raises(StrategyError, match="multidisorder"):
+        make_strategy(z2, {"split": "multidisorder", "pos": "2", "seqovl": 4})
+    z1 = Zapret()
+    make_strategy(z1, {"split": "multisplit", "pos": "1", "seqovl": 5})
+    with pytest.raises(StrategyError, match="disorder"):
+        make_strategy(z1, {"split": "multidisorder", "pos": "1,midsld", "seqovl": 2})
+    make_strategy(TachyonDesync(), {"mode": "split", "split_pos": "2", "seqovl": 4})

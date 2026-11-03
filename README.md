@@ -69,9 +69,10 @@ adf run --simulate                   # полный конвейер без се
 adf env  --ssh root@192.168.8.1      # что установлено на роутере (агент копируется в /tmp)
 adf caps --ssh root@192.168.8.1      # какие параметры desync принимает ваш tachyon-core
 adf import --ssh root@192.168.8.1    # текущие секции Native Desync и предупреждения
+adf tachyon-history --ssh root@192.168.8.1   # разбор истории Fuzzer v2, победители → кандидаты
 adf run  --ssh root@192.168.8.1 --categories youtube,discord --network-id my-isp --report run.md
 adf best --network-id my-isp
-adf compare --ssh root@192.168.8.1 --network-id my-isp --best --strategy "<id или строка>::текущая" --reps 30
+adf compare --ssh root@192.168.8.1 --network-id my-isp --best --current YouTube_desync --reps 30
 adf apply --ssh root@192.168.8.1 --section <секция> <strategy-id> --dry-run   # показать изменения
 adf apply --ssh root@192.168.8.1 --section <секция> <strategy-id>             # с подтверждением
 adf rollback --ssh root@192.168.8.1 --section <секция>
@@ -88,12 +89,19 @@ nftables, маршрутизация и UCI не трогаются. Конфи�
 
 ## Важно про вашу текущую конфигурацию Tachyon
 
-На скриншотах выбран пресет **Adaptive 2.0** и заполнено поле «Строка стратегии
-десинхронизации (Fuzzer / CLI)». Tachyon читает `desync_opts` **только** при пресете
-«Пользовательские параметры» (`connections.uc:1678,1734`), поэтому строка сейчас игнорируется,
-а `auto_tune` дополнительно позволяет ядру менять параметры на лету. `adf import` показывает это
-явно; `adf apply` выставляет `desync_preset=custom`, `desync_auto_tune=0` и все параметры
-стратегии, удаляя устаревшие.
+По данным с вашего роутера (`adf import`, `adf tachyon-history`, подробно — раздел 2.9 аудита):
+
+* `YouTube_desync`: пресет **Adaptive 2.0** (`preset=auto`). Явные опции `split_pos=1 fake_ttl=6
+  fake_sni=max.ru repeats=6 fooling=autottl` ядро получает как стартовые значения, а поле
+  «Строка стратегии (Fuzzer / CLI)» (`desync_opts`) **игнорируется** — Tachyon читает его только
+  при пресете «Пользовательские параметры» (`connections.uc:1678,1734`).
+* Встроенный подборщик за 15 прогонов ни разу не проверял fooling, `fake_disorder`, `multi_*`;
+  победитель для YouTube менялся 4 раза, одна и та же стратегия показывала стабильность от 33 до 100 %.
+* curl на роутере без HTTP/3, поэтому QUIC/UDP-параметры измерить нельзя (ADF их не трогает).
+
+`adf compare --current YouTube_desync` измеряет секцию ровно так, как её запускает Tachyon;
+`adf apply` выставляет `desync_preset=custom`, `desync_auto_tune=0` и все параметры стратегии,
+удаляя устаревшие.
 
 ## Цели и оценка
 

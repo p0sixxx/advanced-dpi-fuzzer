@@ -17,6 +17,7 @@ from .engines import ENGINES, StrategyError, TachyonDesync, get_engine
 from .engines.tachyon_desync import caps_test_matrix, capabilities_from_probe
 from .generator import pairwise
 from .integrations import tachyon as tachyon_int
+from .integrations import tachyon_history
 from .learning import DecayPolicy, build_scores
 from .probe.backend import (AgentBackend, Backend, BackendError, DPIModel, LocalTransport, ProbeSettings,
                             SimulatedBackend, SSHTransport)
@@ -194,6 +195,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     extra = []
     for text in args.strategy or []:
         extra.append(from_text(engine, text, origin="user"))
+    # current Tachyon strategies (adf import) and Fuzzer v2 winners (adf tachyon-history) are always candidates
+    for s in store.strategies(engine.name):
+        if s.origin in ("import", "tachyon_v2"):
+            try:
+                extra.append(make_strategy(engine, s.params, origin=s.origin, name=s.name, caps=caps))
+            except StrategyError as e:
+                eprint(f"skipping stored {s.origin} strategy {s.id}: {e}")
     sc = SearchConfig(network_id=cfg.search.network_id + ("-sim" if args.simulate else ""), seed=args.seed,
                       use_history=not args.fresh, force_without_blocked=args.force)
     orch = Orchestrator(store, backend, engine, targets, controls, sc, guard, caps, extra, log=eprint)
@@ -267,25 +275,25 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def _uci_text(cfg: AppConfig, args: argparse.Namespace) -> str:
+    if getattr(args, "uci_file", None):
+        return Path(args.uci_file).read_text(encoding="utf-8")
+    return _transport(cfg, args).shell("uci -q show tachyon")
+
+
 def cmd_import(args: argparse.Namespace) -> int:
     cfg = _cfg(args)
-    if args.file:
-        text = Path(args.file).read_text(encoding="utf-8")
-    else:
-        text = _transport(cfg, args).shell("uci -q show tachyon")
-    parsed = tachyon_int.parse_uci_show(text)
-    eng = TachyonDesync(measure_udp=True)
+    parsed = tachyon_int.parse_uci_show(_uci_text(cfg, args))
+    store = Store(cfg.db)
     out = []
     for sid in tachyon_int.desync_sections(parsed):
-        imp = tachyon_int.section_to_params(sid, parsed[sid], eng)
-        item = {"section": sid, "kind": imp.kind, "auto_tune": imp.auto_tune, "notes": imp.notes}
+        imp = tachyon_int.section_to_params(sid, parsed[sid])
+        item: Dict[str, Any] = {"section": sid, "kind": imp.kind, "auto_tune": imp.auto_tune,
+                                "tachyon_core_outbound": imp.outbound, "notes": imp.notes}
         if imp.params:
-            try:
-                s = make_strategy(eng, imp.params, origin="import", name=f"tachyon:{sid}")
-                item.update({"strategy_id": s.id, "text": s.text})
-                Store(cfg.db).upsert_strategy(s)
-            except StrategyError as e:
-                item["error"] = str(e)
+            s = make_strategy(TachyonDesync(), imp.params, origin="import", name=f"tachyon:{sid}")
+            item.update({"strategy_id": s.id, "text": s.text})
+            store.upsert_strategy(s)
         if imp.ignored_opts:
             item["ignored_desync_opts"] = imp.ignored_opts
         out.append(item)
@@ -345,6 +353,13 @@ def cmd_compare(args: argparse.Namespace) -> int:
     if not args.no_adaptive:
         variants.append(Variant("Tachyon Adaptive 2.0 (preset=auto)",
                                 outbound={"type": "desync", "preset": "auto", "auto_tune": True}))
+    if args.current:
+        parsed = tachyon_int.parse_uci_show(_uci_text(cfg, args))
+        for sid in args.current:
+            if sid not in parsed:
+                raise SystemExit(f"section {sid} not found in tachyon config")
+            imp = tachyon_int.section_to_params(sid, parsed[sid])
+            variants.append(Variant(f"current: {sid}", outbound=imp.outbound))
     for i, text in enumerate(args.strategy or [], 1):
         ref, _, label = text.partition("::")
         s = _resolve_strategy(store, ref)
@@ -370,6 +385,26 @@ def cmd_compare(args: argparse.Namespace) -> int:
     if args.report:
         Path(args.report).write_text(rep, encoding="utf-8")
     print(rep)
+    return 0
+
+
+def cmd_tachyon_history(args: argparse.Namespace) -> int:
+    cfg = _cfg(args)
+    if args.file:
+        text = Path(args.file).read_text(encoding="utf-8")
+    else:
+        text = _transport(cfg, args).shell("cat /etc/tachyon/fuzzer_history.json")
+    start = text.find("{")
+    data = json.loads(text[start:]) if start >= 0 else {}
+    result = tachyon_history.analyze(data)
+    store = Store(cfg.db)
+    for s in result["strategies"]:
+        store.upsert_strategy(s)
+    if args.json:
+        out = dict(result, strategies=[s.to_dict() for s in result["strategies"]])
+        print(json.dumps(out, ensure_ascii=False, indent=2))
+    else:
+        print(tachyon_history.markdown(result))
     return 0
 
 
@@ -508,7 +543,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("import", help="read current Tachyon Native Desync sections")
     where(sp, simulate=False)
-    sp.add_argument("--file", help="saved `uci show tachyon` output instead of SSH")
+    sp.add_argument("--uci-file", "--file", dest="uci_file", help="saved `uci show tachyon` output instead of SSH")
     sp.set_defaults(func=cmd_import)
 
     for name, fn, hlp in (("apply", cmd_apply, "apply a strategy to a Tachyon section (asks for confirmation)"),
@@ -528,11 +563,20 @@ def build_parser() -> argparse.ArgumentParser:
     tsel(sp)
     sp.add_argument("--strategy", action="append", help="id-or-string[::label] (repeatable)")
     sp.add_argument("--best", action="store_true", help="include the stored best strategy")
+    sp.add_argument("--current", action="append", metavar="SECTION",
+                    help="measure a Tachyon desync section exactly as configured (repeatable)")
+    sp.add_argument("--uci-file", help="saved `uci show tachyon` output for --current")
     sp.add_argument("--no-adaptive", action="store_true")
     sp.add_argument("--reps", type=int, default=20)
     sp.add_argument("--report")
     sp.add_argument("-y", "--yes", action="store_true")
     sp.set_defaults(func=cmd_compare)
+
+    sp = sub.add_parser("tachyon-history", help="analyse Tachyon Fuzzer v2 history and import its winners")
+    where(sp, simulate=False)
+    sp.add_argument("--file", help="local copy of /etc/tachyon/fuzzer_history.json (or adf-info.txt)")
+    sp.add_argument("--json", action="store_true")
+    sp.set_defaults(func=cmd_tachyon_history)
 
     sp = sub.add_parser("bench", help="offline algorithm comparison on the DPI simulator")
     sp.add_argument("--seeds", default="1,2,3,4,5")

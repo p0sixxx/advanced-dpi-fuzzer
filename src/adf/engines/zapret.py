@@ -78,9 +78,11 @@ class Zapret(Engine):
             for item in items:
                 if not _MARKER_RE.match(item):
                     return f"invalid marker '{item}' (v1 markers: method,host,endhost,sld,endsld,midsld,sniext)"
+            # readme.en.md: "Disorder requires seqovl to be less than split position"
             seqovl = int(params.get("seqovl", 0) or 0)
-            if seqovl and items[0].isdigit() and seqovl >= int(items[0]):
-                return "seqovl must be smaller than the first split position"
+            if (seqovl and "disorder" in str(params.get("split")) and items[0].isdigit()
+                    and seqovl >= int(items[0])):
+                return "disorder: seqovl must be smaller than the first split position"
         if _has_fake(params) and params.get("fooling", "none") == "none" and not int(params.get("ttl", 0) or 0):
             return "fakes need fooling or a TTL"
         return None

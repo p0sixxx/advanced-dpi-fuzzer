@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from ..engines import StrategyError, TachyonDesync
-from ..engines.tachyon_desync import KEY_ORDER, preset_params
+from ..engines.tachyon_desync import CORE_DEFAULTS, KEY_ORDER, normalize_pos, preset_params
 from ..strategy import Strategy
 
 CONFIG = "tachyon"
@@ -58,12 +58,31 @@ def desync_sections(cfg: Mapping[str, Mapping[str, Any]]) -> List[str]:
     return res
 
 
+
+# connections.uc norm_preset aliases
+_PRESET_ALIASES = {
+    "adaptive": "auto", "smart": "auto", "fakesplit": "fake_split", "fake+split": "fake_split",
+    "fakedsplit": "fake_split", "faked_split": "fake_split", "fakedisorder": "fake_disorder",
+    "fake+disorder": "fake_disorder", "multidisorder": "multi_disorder", "multi+disorder": "multi_disorder",
+    "fakeddisorder": "multi_disorder", "faked_disorder": "multi_disorder", "multisplit": "multi_split",
+    "multi+split": "multi_split", "tls_rec": "tlsrec", "youtube": "fake_split", "google_youtube": "fake_split",
+    "discord": "fake_split", "general": "fake_split", "general_fake_tls": "fake_split", "general_alt": "tlsrec",
+    "aggressive": "fake_disorder", "general_alt2": "fake_disorder", "general_multisplit": "multi_split",
+    "light": "split", "general_simple_fake": "split",
+}
+_KNOWN_PRESETS = {"auto", "fake_split", "fake_disorder", "multi_disorder", "multi_split", "tlsrec", "split",
+                  "disorder", "fake", "oob"}
+TCP_KEYS = ("mode", "split_pos", "fooling", "fake_ttl", "fake_sni", "repeats", "split_delay_ms", "seqovl",
+            "syndata", "wsize", "ipfrag", "tlsrec_first")
+
+
 @dataclass
 class ImportedSection:
     section: str
     kind: str                       # "fixed" | "adaptive"
-    params: Optional[Dict[str, Any]]
+    params: Optional[Dict[str, Any]]  # measurable TCP strategy (None: adaptive or not expressible)
     auto_tune: Optional[bool]
+    outbound: Dict[str, Any] = field(default_factory=dict)  # exact object Tachyon passes to tachyon-core
     ignored_opts: str = ""          # desync_opts present but ignored by Tachyon
     notes: List[str] = field(default_factory=list)
 
@@ -72,49 +91,124 @@ def _bool(v: Any) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
-def section_to_params(sid: str, opts: Mapping[str, Any], engine: Optional[TachyonDesync] = None) -> ImportedSection:
+def _norm_preset(v: Any) -> str:
+    v = str(v or "").strip().lower()
+    if v in ("", "none", "custom"):
+        return ""
+    v = _PRESET_ALIASES.get(v, v)
+    return v if v in _KNOWN_PRESETS else "auto"
+
+
+def _pos_items(value: Any, notes: List[str]) -> Any:
+    """Per-item tolerant split_pos normalisation (connections.uc drops invalid items silently)."""
+    items = []
+    for part in str(value).split(","):
+        try:
+            items.append(normalize_pos(part))
+        except StrategyError:
+            if part.strip():
+                notes.append(f"split_pos item {part.strip()!r} is dropped by Tachyon")
+    if not items:
+        return None
+    conv = [int(i) if i.isdigit() else i for i in items]
+    return conv[0] if len(conv) == 1 else conv
+
+
+def section_outbound(opts: Mapping[str, Any], engine: Optional[TachyonDesync] = None) -> Tuple[Dict[str, Any], List[str], str]:
+    """The ``desync`` outbound Tachyon generates for a section (connections.uc semantics).
+
+    Returns (outbound, notes, ignored desync_opts).
+    """
     engine = engine or TachyonDesync(measure_udp=True)
+    notes: List[str] = []
     raw_preset = str(opts.get("desync_preset", "")).strip().lower()
     is_custom = raw_preset in ("", "custom")
-    auto_tune = _bool(opts["desync_auto_tune"]) if "desync_auto_tune" in opts else None
-    notes: List[str] = []
-    params: Dict[str, Any] = {}
-    if not is_custom:
-        try:
-            params = preset_params(raw_preset)
-        except StrategyError:
-            res = ImportedSection(sid, "adaptive", None, auto_tune)
-            if opts.get("desync_opts"):
-                res.ignored_opts = str(opts["desync_opts"])
-                res.notes.append("desync_opts is ignored by Tachyon because desync_preset is not 'custom'")
-            return res
-    elif opts.get("desync_mode"):
-        params["mode"] = engine.normalize_value("mode", opts["desync_mode"])
-    for key, opt in OPTION_FOR_KEY.items():
-        if key == "mode" or opt not in opts:
-            continue
-        v = opts[opt]
-        if key in ("seqovl", "wsize", "udplen") and str(v) in ("", "0"):
-            continue
-        try:
-            params[key] = engine.normalize_value(key, v)
-        except (StrategyError, ValueError):
-            notes.append(f"{opt}={v!r} is not understood and was dropped (Tachyon drops it too)")
+    ob: Dict[str, Any] = {"type": "desync"}
+    preset = _norm_preset(raw_preset)
+    if preset:
+        ob["preset"] = preset
+    if is_custom and opts.get("desync_mode"):
+        ob["mode"] = engine.normalize_value("mode", opts["desync_mode"])
+    fooling = engine.normalize_value("fooling", opts.get("desync_fooling", ""))
+    if fooling:
+        ob["fooling"] = fooling
+    if str(opts.get("desync_auto_tune", "")).strip() != "":
+        ob["auto_tune"] = _bool(opts["desync_auto_tune"])
+    if _bool(opts.get("desync_tlsrec_first", "0")):
+        ob["tlsrec_first"] = True
+    if raw_preset == "discord" and not _bool(opts.get("desync_udp_fake", "0")):
+        ob["udp_fake"] = True
+    if "preset" not in ob and "mode" not in ob:
+        ob["preset"] = "auto"
+    if opts.get("desync_split_pos"):
+        sp = _pos_items(opts["desync_split_pos"], notes)
+        if sp is not None:
+            ob["split_pos"] = sp
+    for key in ("seqovl", "wsize", "udplen", "fake_ttl", "repeats", "udp_repeats", "udp_fake_ttl"):
+        v = str(opts.get("desync_" + key, "")).strip()
+        if v.isdigit() and int(v) > 0:
+            ob[key] = int(v)
+    for key in ("syndata", "ipfrag"):
+        if _bool(opts.get("desync_" + key, "0")):
+            ob[key] = True
+    if str(opts.get("desync_fake_sni", "")).strip():
+        ob["fake_sni"] = str(opts["desync_fake_sni"]).strip()
+    sd = str(opts.get("desync_split_delay_ms", "")).strip()
+    if sd.isdigit():
+        ob["split_delay_ms"] = int(sd)
+    if str(opts.get("desync_udp_fake", "")).strip() != "":
+        ob["udp_fake"] = _bool(opts["desync_udp_fake"])
     ignored = ""
     if opts.get("desync_opts"):
         if is_custom:
             parsed, dropped = _parse_partial(engine, str(opts["desync_opts"]))
-            params.update(parsed)
+            for k, v in parsed.items():
+                if k == "split_pos":
+                    v = _pos_items(v, notes)
+                    if v is None:
+                        continue
+                ob[k] = v
             notes += [f"desync_opts token {t!r} dropped (Tachyon ignores it too)" for t in dropped]
         else:
             ignored = str(opts["desync_opts"])
             notes.append("desync_opts is ignored by Tachyon because desync_preset is not 'custom'")
-    if "mode" not in params:
-        params["mode"] = "fake_split"
-        notes.append("no mode set: Tachyon falls back to fake_split")
+    return ob, notes, ignored
+
+
+def section_to_params(sid: str, opts: Mapping[str, Any], engine: Optional[TachyonDesync] = None) -> ImportedSection:
+    """Import a section: exact outbound + (when it is a fixed strategy) its measurable TCP params.
+
+    Keys Tachyon leaves out get tachyon-core's defaults (CORE_DEFAULTS), so the
+    imported strategy is what the core actually runs, not ADF's neutral values.
+    """
+    tcp_engine = TachyonDesync()
+    ob, notes, ignored = section_outbound(opts, engine)
+    auto_tune = ob.get("auto_tune")
+    preset = ob.get("preset")
+    if preset == "auto":
+        notes.append("Adaptive 2.0 (preset=auto): tachyon-core chooses the strategy itself; "
+                     "explicit options are passed as starting values")
+        return ImportedSection(sid, "adaptive", None, auto_tune, ob, ignored, notes)
+    params: Dict[str, Any] = preset_params(preset) if preset else {"mode": ob.get("mode", "fake_split")}
+    if "mode" in ob:
+        params["mode"] = ob["mode"]
+    for k in TCP_KEYS[1:]:
+        if k in ob:
+            v = ob[k]
+            params[k] = ",".join(str(x) for x in v) if isinstance(v, list) else v
+    for k, v in CORE_DEFAULTS.items():
+        params.setdefault(k, v)
     if auto_tune:
         notes.append("auto_tune=1: tachyon-core may switch away from these parameters at runtime")
-    return ImportedSection(sid, "fixed", params, auto_tune, ignored, notes)
+    try:
+        canon = tcp_engine.canonicalize(params)
+        reason = tcp_engine.check(canon)
+    except StrategyError as e:
+        canon, reason = None, str(e)
+    if reason is not None:
+        notes.append(f"not expressible as a fixed ADF strategy ({reason}); measured as the raw outbound")
+        canon = None
+    return ImportedSection(sid, "fixed", canon, auto_tune, ob, ignored, notes)
 
 
 def _parse_partial(engine: TachyonDesync, text: str) -> Tuple[Dict[str, Any], List[str]]:

@@ -128,8 +128,40 @@ def test_import_reflects_tachyon_semantics():
     dc = ti.section_to_params("dc", cfg["dc"])
     assert dc.kind == "fixed"
     assert dc.params["mode"] == "fake_split" and dc.params["fooling"] == "md5" and dc.params["repeats"] == 4
-    assert "split_pos" not in dc.params  # midsld+7 is dropped by Tachyon as well
-    assert any("bogus" in n for n in dc.notes)
+    # midsld+7 is dropped by Tachyon, so the core runs its default position
+    assert "split_pos" not in dc.outbound and dc.params["split_pos"] == "midsld"
+    assert dc.params["split_delay_ms"] == 1  # absent option = core default, not "off"
+    assert any("bogus" in n for n in dc.notes) and any("midsld+7" in n for n in dc.notes)
+
+
+def test_import_real_router_layout():
+    """Section layout reported from a GL.iNet Flint 2 (OpenWrt 25.12.6, tachyon-core 0.3.4)."""
+    show = """tachyon.YouTube_desync=section
+tachyon.YouTube_desync.action='desync'
+tachyon.YouTube_desync.desync_preset='auto'
+tachyon.YouTube_desync.desync_fake_sni='max.ru'
+tachyon.YouTube_desync.desync_opts='mode=fake_split split_pos=1 fake_ttl=6 fake_sni=max.ru repeats=6'
+tachyon.YouTube_desync.desync_split_pos='1'
+tachyon.YouTube_desync.desync_fake_ttl='6'
+tachyon.YouTube_desync.desync_repeats='6'
+tachyon.YouTube_desync.desync_fooling='autottl'
+tachyon.src_api=outbound_source
+tachyon.src_api.source_type='desync'
+tachyon.src_api.desync_preset='custom'
+tachyon.src_api.desync_mode='fake_split'
+tachyon.src_api.desync_split_pos='1'
+tachyon.src_api.desync_fake_ttl='6'
+tachyon.src_api.desync_fooling='autottl'
+"""
+    cfg = ti.parse_uci_show(show)
+    assert ti.desync_sections(cfg) == ["YouTube_desync", "src_api"]
+    yt = ti.section_to_params("YouTube_desync", cfg["YouTube_desync"])
+    assert yt.kind == "adaptive" and yt.params is None
+    assert yt.outbound == {"type": "desync", "preset": "auto", "fooling": "autottl", "split_pos": 1, "fake_ttl": 6,
+                           "repeats": 6, "fake_sni": "max.ru"}
+    api = ti.section_to_params("src_api", cfg["src_api"])
+    assert api.outbound["mode"] == "fake_split" and "preset" not in api.outbound
+    assert api.params["fooling"] == "autottl" and api.params["repeats"] == 1
 
 
 def test_export_import_round_trip():
@@ -172,3 +204,48 @@ def test_example_configs_load(tmp_path):
     bad.write_text('[router]\nhost="x"\npassword="secret"\n')
     with pytest.raises(ValueError, match="secrets"):
         load_config(bad)
+
+
+HISTORY = {"entries": [
+    {"timestamp": 1793517713, "engine": "desync", "target": "youtube_suite", "mode": "presets",
+     "best_strategy": {"name": "Fake + Split", "args": "mode=fake_split split_pos=1 fake_ttl=4 repeats=6",
+                       "stability_pct": 33, "confidence": "low"}, "total_tested": 18, "working_count": 1,
+     "dpi_detection": {"type": "drop", "details": "TCP connect timed out for x",
+                       "probe_metrics": {"error": "TLS handshake stalled after TCP connect"}}, "duration_sec": 76},
+    {"timestamp": 1793518096, "engine": "desync", "target": "youtube_suite", "mode": "adaptive",
+     "best_strategy": {"name": "⭐ Prior Winner: ⭐ Prior Winner: Fake + Split",
+                       "args": "mode=fake_split split_pos=1 fake_ttl=4 repeats=6", "stability_pct": 100},
+     "total_tested": 18, "working_count": 1, "dpi_detection": {"type": "drop"}, "duration_sec": 50},
+    {"timestamp": 1793517563, "engine": "desync", "target": "custom", "mode": "presets",
+     "best_strategy": {"args": "preset=oob", "stability_pct": 100}, "total_tested": 18, "working_count": 18,
+     "dpi_detection": {"type": "none", "details": "Target directly accessible"}, "duration_sec": 28},
+    {"timestamp": 1793030633, "engine": "zapret2", "target": "youtube_suite", "mode": "presets",
+     "best_strategy": {"args": "--lua-desync=fake:blob=tls_google:repeats=8:tcp_ts=-600000:tcp_ts_up "
+                               "--lua-desync=multisplit:pos=1:seqovl=681:seqovl_pattern=tls_google"},
+     "dpi_detection": {"type": "drop"}},
+]}
+
+
+def test_tachyon_history_analysis():
+    from adf.integrations.tachyon_history import analyze, markdown
+    res = analyze(HISTORY)
+    text = " ".join(res["findings"])
+    assert "not blocked" in text and "stability 33%, 100%" in text
+    assert "nested" in text and "TCP connect timed out" in text
+    engines = sorted(s.engine for s in res["strategies"])
+    assert engines == ["tachyon_desync", "tachyon_desync", "zapret2"]
+    # absent options = tachyon-core defaults, as the Tachyon fuzzer probe ran them
+    fs = [s for s in res["strategies"] if "fake_ttl=4" in s.text][0]
+    assert fs.params["split_delay_ms"] == 1
+    assert "youtube_suite" in markdown(res)
+
+
+def test_compare_current_section(tmp_path, capsys):
+    from adf.cli import main
+    uci = tmp_path / "uci.txt"
+    uci.write_text(UCI_SHOW)
+    db = str(tmp_path / "c.sqlite")
+    assert main(["--db", db, "compare", "--simulate", "--current", "yt", "--current", "dc", "--uci-file", str(uci),
+                 "--no-adaptive", "--reps", "3", "--only", "youtube-www"]) == 0
+    out = capsys.readouterr().out
+    assert "current: yt" in out and "current: dc" in out and "СИМУЛЯЦИЯ" in out
