@@ -122,9 +122,17 @@ def cmd_caps(args: argparse.Namespace) -> int:
     store = Store(cfg.db)
     store.save_capabilities(TachyonDesync.name, data["host"], data)
     caps = capabilities_from_probe(data)
-    print(json.dumps({"version": data["version"], "accepted": sum(1 for r in res if r.get("ok")),
-                      "rejected": [f"{r['key']}={r['value']}" for r in res if not r.get("ok")],
-                      "capabilities": caps.to_dict()}, ensure_ascii=False, indent=2))
+    real = [r for r in res if not r.get("control")]
+    controls = [r for r in res if r.get("control")]
+    print(json.dumps({
+        "version": data["version"],
+        "accepted": sum(1 for r in real if r.get("ok")), "tested": len(real),
+        "rejected": [f"{r['key']}={r['value']}" for r in real if not r.get("ok")],
+        "invalid_values_correctly_rejected": sum(1 for r in controls if not r.get("ok")),
+        "invalid_values_accepted": [f"{r['key']}={r['value']}" for r in controls if r.get("ok")],
+        "note": ("keys listed in capabilities.extra.unverifiable_by_check are not validated by "
+                 "`tachyon-core check`; their support is judged by measurements, not by check"),
+        "capabilities": caps.to_dict()}, ensure_ascii=False, indent=2))
     return 0
 
 
@@ -278,7 +286,7 @@ def cmd_export(args: argparse.Namespace) -> int:
 def _uci_text(cfg: AppConfig, args: argparse.Namespace) -> str:
     if getattr(args, "uci_file", None):
         return Path(args.uci_file).read_text(encoding="utf-8")
-    return _transport(cfg, args).shell("uci -q show tachyon")
+    return _transport(cfg, args).shell(tachyon_int.SHOW_DESYNC_CMD)
 
 
 def cmd_import(args: argparse.Namespace) -> int:

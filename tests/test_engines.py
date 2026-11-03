@@ -100,7 +100,9 @@ def test_capabilities_from_probe():
     results = []
     for t in tests:
         ok = not (t["key"] == "fooling" or (t["key"] == "mode" and t["value"] == "multi_disorder"))
-        results.append({"key": t["key"], "value": t["value"], "ok": ok})
+        if t.get("control"):
+            ok = False
+        results.append({"key": t["key"], "value": t["value"], "ok": ok, "control": bool(t.get("control"))})
     caps = capabilities_from_probe({"host": "r", "version": "0.3.4", "results": results})
     assert "fooling" in caps.unsupported
     assert not caps.accepts("mode", "multi_disorder")

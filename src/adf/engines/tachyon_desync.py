@@ -491,16 +491,28 @@ def capabilities_from_probe(data: Mapping[str, Any]) -> Capabilities:
     """
     allowed: Dict[str, set] = {}
     rejected: Dict[str, set] = {}
+    unverifiable = sorted({item["key"] for item in data.get("results", [])
+                           if item.get("control") and item.get("ok") and item["key"] != "adf_unknown_key"})
+    unknown_keys_accepted = any(item.get("control") and item.get("ok") and item["key"] == "adf_unknown_key"
+                                for item in data.get("results", []))
     for item in data.get("results", []):
+        if item.get("control"):
+            continue
         key, value, ok = item["key"], item["value"], bool(item["ok"])
         if key == "split_pos":
             try:
                 value = normalize_pos(value)
             except StrategyError:
                 continue
-        (allowed if ok else rejected).setdefault(key, set()).add(_coerce(key, value))
+        try:
+            coerced = _coerce(key, value)
+        except (ValueError, StrategyError):
+            continue
+        (allowed if ok else rejected).setdefault(key, set()).add(coerced)
     caps = Capabilities(engine=TachyonDesync.name, source=f"probed:{data.get('host', 'router')}",
-                        version=str(data.get("version", "")))
+                        version=str(data.get("version", "")),
+                        extra={"unverifiable_by_check": unverifiable,
+                               "unknown_keys_accepted": unknown_keys_accepted})
     for key, bad in rejected.items():
         if key not in allowed:
             caps.unsupported.add(key)
@@ -553,6 +565,15 @@ def caps_test_matrix() -> List[Dict[str, Any]]:
     for key, value in (("seqovl", 1), ("syndata", True), ("wsize", 1), ("ipfrag", True),
                        ("tlsrec_first", True), ("udplen", 4), ("auto_tune", False)):
         add(key, value)
+    # Negative controls: deliberately invalid values. If `check` accepts one, it does not
+    # validate that key, and acceptance of its real values proves nothing.
+    for key, value, extra in (("mode", "adf_invalid_mode", None), ("split_pos", "adf_invalid_pos", None),
+                              ("fooling", "adf_invalid_fooling", {"mode": "fake_split"}),
+                              ("adf_unknown_key", 1, None), ("seqovl", "x", None), ("syndata", "x", None),
+                              ("wsize", "x", None), ("ipfrag", "x", None), ("tlsrec_first", "x", None),
+                              ("udplen", "x", None)):
+        add(key, value, extra)
+        tests[-1]["control"] = True
     return tests
 
 

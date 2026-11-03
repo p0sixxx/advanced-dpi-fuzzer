@@ -32,20 +32,54 @@ ALL_DESYNC_OPTIONS = sorted(set(OPTION_FOR_KEY.values()) | {"desync_preset", "de
 _LINE = re.compile(r"^([A-Za-z0-9_-]+)\.([A-Za-z0-9_@\[\]-]+)(?:\.([A-Za-z0-9_-]+))?=(.*)$")
 
 
+# Only these lines are fetched from the router: section types and desync-related
+# options. Subscription URLs, keys and other options never leave the router.
+UCI_FILTER = (r"^tachyon\.[^.=]+=(section|outbound_source)$|"
+              r"^tachyon\.[^.=]+\.(action|source_type|desync_[a-z0-9_]+)=")
+SHOW_DESYNC_CMD = f"uci -q show {CONFIG} | grep -E '{UCI_FILTER}'"
+
+
+def _split_value(value: str) -> List[str]:
+    try:
+        return shlex.split(value) if value else [""]
+    except ValueError:
+        # unbalanced quoting that survived joining: keep the raw text without outer quotes
+        return [value.strip().strip("'")]
+
+
 def parse_uci_show(text: str) -> Dict[str, Dict[str, Any]]:
-    """Parse ``uci show <config>`` output into {section: {".type": t, option: value}}."""
+    """Parse ``uci show <config>`` output into {section: {".type": t, option: value}}.
+
+    Values may span several lines (uci quotes embedded newlines); continuation
+    lines are joined until the quoting balances.
+    """
     out: Dict[str, Dict[str, Any]] = {}
-    for raw in text.splitlines():
-        m = _LINE.match(raw.strip())
+    lines = text.splitlines()
+    i = 0
+    while i < len(lines):
+        raw = lines[i].strip()
+        i += 1
+        m = _LINE.match(raw)
         if not m:
             continue
         _, sid, opt, value = m.groups()
-        vals = shlex.split(value) if value else [""]
+        while i < len(lines) and not _balanced(value):
+            value += "\n" + lines[i]
+            i += 1
+        vals = _split_value(value)
         if opt is None:
             out.setdefault(sid, {})[".type"] = vals[0] if vals else ""
         else:
             out.setdefault(sid, {})[opt] = vals[0] if len(vals) == 1 else vals
     return out
+
+
+def _balanced(value: str) -> bool:
+    try:
+        shlex.split(value)
+        return True
+    except ValueError:
+        return False
 
 
 def desync_sections(cfg: Mapping[str, Mapping[str, Any]]) -> List[str]:
@@ -332,7 +366,7 @@ class TachyonRemote:
         self.transport = transport
 
     def show(self) -> str:
-        return self.transport.shell(f"uci -q show {CONFIG}")
+        return self.transport.shell(SHOW_DESYNC_CMD)
 
     def save_full_backup(self) -> str:
         """Full ``uci export`` copy kept on the router (tmpfs is not used: survives reboot)."""

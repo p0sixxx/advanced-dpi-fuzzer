@@ -321,13 +321,13 @@ class AgentBackend(Backend):
             lines.append(f"{t['key']}\t{json.dumps(t['value'])}\t{json.dumps(cfg)}")
         out = self.transport.call(["caps"], stdin="\n".join(lines) + "\n", timeout=30 + 5 * len(lines))
         res = []
-        for item in parse_lines(out):
-            if item.get("t") == "caps":
-                try:
-                    item["value"] = json.loads(item["value"])
-                except (TypeError, json.JSONDecodeError):
-                    pass
-                res.append(item)
+        for item, test in zip([i for i in parse_lines(out) if i.get("t") == "caps"], tests):
+            try:
+                item["value"] = json.loads(item["value"])
+            except (TypeError, json.JSONDecodeError):
+                pass
+            item["control"] = bool(test.get("control"))
+            res.append(item)
         return res
 
     def tachyon_probe(self, engine: str, args: str, url: str) -> Dict[str, Any]:
@@ -459,4 +459,5 @@ class SimulatedBackend(Backend):
         return batch
 
     def capabilities(self, tests: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-        return [{"t": "caps", "key": t["key"], "value": t["value"], "ok": True, "error": ""} for t in tests]
+        return [{"t": "caps", "key": t["key"], "value": t["value"], "ok": not t.get("control"), "error": "",
+                 "control": bool(t.get("control"))} for t in tests]

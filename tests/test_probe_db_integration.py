@@ -284,3 +284,33 @@ def test_fakeip_answers_are_discarded():
     from adf.probe.backend import usable_addresses
     assert usable_addresses(["198.18.0.5", "142.250.74.14", "fc00::12", "2a00:1450:4010:c0e::5d", "10.0.0.1",
                              "garbage", "127.0.0.1"]) == ["142.250.74.14", "2a00:1450:4010:c0e::5d"]
+
+
+def test_parse_uci_show_multiline_and_quotes():
+    show = ("tachyon.sub=outbound_source\n"
+            "tachyon.sub.source_type='subscription'\n"
+            "tachyon.sub.json='{\"a\": 1,\n  \"b\": \"x\"}'\n"
+            "tachyon.sub.name='it'\\''s'\n"
+            "tachyon.yt=section\n"
+            "tachyon.yt.action='desync'\n"
+            "tachyon.yt.desync_preset='custom'\n"
+            "tachyon.yt.desync_mode='split'\n")
+    cfg = ti.parse_uci_show(show)
+    assert cfg["sub"]["name"] == "it's" and cfg["sub"]["json"].startswith('{"a"')
+    assert ti.desync_sections(cfg) == ["yt"]
+    assert "desync_" in ti.SHOW_DESYNC_CMD and "grep -E" in ti.SHOW_DESYNC_CMD
+
+
+def test_caps_negative_controls():
+    from adf.engines.tachyon_desync import caps_test_matrix, capabilities_from_probe
+    tests = caps_test_matrix()
+    assert any(t.get("control") for t in tests)
+    res = []
+    for t in tests:
+        # binary that validates mode but silently accepts anything for fooling
+        ok = not (t.get("control") and t["key"] != "fooling")
+        res.append({"key": t["key"], "value": t["value"], "ok": ok, "control": bool(t.get("control"))})
+    caps = capabilities_from_probe({"host": "r", "version": "0.3.4", "results": res})
+    assert caps.extra["unverifiable_by_check"] == ["fooling"]
+    assert caps.extra["unknown_keys_accepted"] is False
+    assert not caps.unsupported
