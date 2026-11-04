@@ -51,7 +51,7 @@ def _cfg(args: argparse.Namespace) -> AppConfig:
 
 
 def _transport(cfg: AppConfig, args: argparse.Namespace):
-    if getattr(args, "local", False):
+    if getattr(args, "local", False) or cfg.router.local:
         return LocalTransport()
     if not cfg.router.host:
         raise SystemExit("no router configured: use --ssh root@192.168.8.1, --local, --simulate or [router] in config")
@@ -468,7 +468,7 @@ def cmd_stop(args: argparse.Namespace) -> int:
     cfg.stop_file.parent.mkdir(parents=True, exist_ok=True)
     cfg.stop_file.write_text(str(time.time()))
     print(f"stop requested ({cfg.stop_file}); the running search stops after the current batch")
-    if getattr(args, "ssh", None) or getattr(args, "local", False):
+    if getattr(args, "ssh", None) or getattr(args, "local", False) or cfg.router.local:
         try:
             print(_transport(cfg, args).call(["stop"]).strip())
         except BackendError as e:

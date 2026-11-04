@@ -87,6 +87,41 @@ nftables, маршрутизация и UCI не трогаются. Конфи�
 Остановка: `Ctrl+C`, `adf stop` или файл `~/.adf/STOP` — текущий пакет проб завершается, всё
 сохраняется, следующий запуск продолжает с накопленными данными.
 
+## Запуск на самом роутере
+
+ПК нужен только для сборки: поиск работает на роутере в фоне и не зависит от SSH-сессии.
+Сборка, на ПК (нужен только Python, файл появится в `dist/`):
+
+```sh
+python packaging/build_release.py
+```
+
+Установка, из Git Bash, WSL или Linux (PowerShell не поддерживает `<`):
+
+```sh
+ssh root@192.168.8.1 "cat > /tmp/adf-router.sh" < dist/adf-router-0.1.0.sh
+ssh -t root@192.168.8.1 sh /tmp/adf-router.sh
+```
+
+Установщик ставит Python через `apk` или `opkg` (флаг `--no-deps` запрещает это) и разворачивает ADF
+в `/opt/adf`. Tachyon, firewall и маршруты он не меняет. Повторный запуск обновляет ADF, не трогая
+настройки в `/etc/adf/config.toml` и результаты в `/root/.adf`. Дальше команды выполняются на роутере:
+
+```sh
+adf-router run                                    # youtube,discord, до 60 минут, в фоне
+adf-router run --categories discord --minutes 30
+adf-router status                                 # идёт ли поиск и последние строки лога
+adf-router log -f
+adf-router stop                                   # данные сохраняются
+adf-router report                                 # последний отчёт
+adf-router best
+adf-router uninstall                              # --purge удалит и результаты
+```
+
+`adf` на роутере работает как обычно: `adf import`, `adf compare ...`, `adf apply ...`. Конфигурацию
+Tachyon меняет только `adf apply`, и только после подтверждения. База на роутере своя, результаты с
+ПК в неё не попадают.
+
 ## Как Tachyon читает настройки Native Desync
 
 Сверено с кодом Tachyon и с `/etc/tachyon-core/config.json` на роутере:
@@ -123,6 +158,8 @@ YouTube Music, googlevideo, Discord, Telegram, GitHub, Cloudflare (+ контр�
 * `adf compare` перезапускает движок каждый раунд, поэтому Adaptive 2.0 измеряется с холодного старта.
 * Цель `youtube-video` проверяет прохождение TLS к googlevideo, а не скорость видеопотока.
 * `adf run` и `adf compare` без терминала (скрипты, агенты) требуют `--yes`.
+* Установщик для роутера (`dist/adf-router-*.sh`) проверен тестами на имитации роутера (`sh`, busybox
+  `ash`, поддельный `apk`), но ещё не устанавливался на настоящий OpenWrt.
 * Тесты рассчитаны на Linux: на Windows запускайте их в WSL (e2e-тесты агента там не работают).
 * zapret/zapret2: генерация, валидация и экспорт есть; прямое измерение через `adf-agent run` — нет
   (nfqws требует правил nfqueue). Агент умеет делегировать одну пробу встроенному фаззеру Tachyon

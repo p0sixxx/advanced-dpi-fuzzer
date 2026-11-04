@@ -18,6 +18,7 @@ class RouterConfig:
     port: int = 22
     identity: Optional[str] = None
     remote_agent: str = "/tmp/adf-agent.sh"
+    local: bool = False             # the controller runs on the router itself
 
 
 @dataclass
