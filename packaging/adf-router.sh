@@ -1,6 +1,7 @@
 #!/bin/sh
 # adf-router — runs Advanced DPI Fuzzer on the router itself, without a PC.
 #
+#   adf-router check [service[,service]] [--minutes N] [-- adf-run-args]
 #   adf-router run [--categories a,b] [--minutes N] [--report FILE] [--foreground] [-- adf-run-args]
 #   adf-router status | log [-f] | stop | report | best | uninstall [--purge] | help
 #
@@ -8,11 +9,12 @@
 # configuration changes solely through `adf apply`, which asks for confirmation.
 #
 # Environment overrides (used by tests): ADF_PREFIX (/opt/adf), ADF_BIN_DIR (/usr/bin),
-# ADF_CONF_DIR (/etc/adf).
+# ADF_CONF_DIR (/etc/adf), ADF_TTY (/dev/tty).
 
 PREFIX="${ADF_PREFIX:-/opt/adf}"
 BIN_DIR="${ADF_BIN_DIR:-/usr/bin}"
 CONF_DIR="${ADF_CONF_DIR:-/etc/adf}"
+TTY="${ADF_TTY:-/dev/tty}"
 STATE_DIR="${HOME:-/root}/.adf"
 LOG="$STATE_DIR/run.log"
 PID_FILE="$STATE_DIR/run.pid"
@@ -28,7 +30,10 @@ usage() {
 	cat <<EOF
 Advanced DPI Fuzzer on the router.
 
-  adf-router run [options]   start a search in the background
+  adf-router check [service] pick a service and depth, run the search, show the result
+      --minutes N            skip the depth question
+      -- ...                 extra arguments for \`adf run\`
+  adf-router run [options]   start a search in the background and return
       --categories a,b       targets (default: $DEFAULT_CATEGORIES)
       --minutes N            time budget (default: $DEFAULT_MINUTES)
       --report FILE          report path (default: $REPORTS/run-<date>.md)
@@ -123,7 +128,7 @@ EOF
 	"$BIN_DIR/adf" validate "mode=split split_pos=1" >/dev/null || die "self-check failed"
 	command -v tachyon-core >/dev/null 2>&1 || echo "warning: tachyon-core not found: searches will not start"
 	echo "Advanced DPI Fuzzer $(cat "$PREFIX/VERSION") installed in $PREFIX."
-	echo "Start a search:  adf-router run"
+	echo "Start a check:   adf-router check"
 	echo "All commands:    adf-router help"
 }
 
@@ -166,6 +171,104 @@ cmd_run() {
 	echo "Search started in the background: $categories, up to $minutes min."
 	echo "Progress: adf-router status   Stop: adf-router stop"
 	echo "Report:   $report"
+}
+
+ask() {
+	printf '%s' "$1"
+	IFS= read -r answer <&3 || die "no answer from the terminal"
+}
+
+choose_service() {
+	services=$("$BIN_DIR/adf" targets | awk '$2 != "control" && !seen[$2]++ { print $2 }')
+	[ -n "$services" ] || die "the target list is empty"
+	echo "Which service to check?"
+	i=0
+	for s in $services; do
+		i=$((i + 1))
+		printf '  %d) %s\n' "$i" "$s"
+	done
+	echo "  a) all of them"
+	ask "Number, or several like 1,3: "
+	case "$answer" in
+		a|A) service=$(echo "$services" | tr '\n' ',' | sed 's/,$//'); return ;;
+	esac
+	service=""
+	for n in $(echo "$answer" | tr ',' ' '); do
+		case "$n" in
+			*[!0-9]*) die "not a number: $n" ;;
+		esac
+		s=$(echo "$services" | sed -n "${n}p")
+		[ -n "$s" ] || die "no service number $n"
+		service="${service:+$service,}$s"
+	done
+	[ -n "$service" ] || die "no service chosen"
+}
+
+choose_minutes() {
+	echo "How long?"
+	echo "  1) quick, 5 min: a first working strategy"
+	echo "  2) normal, 20 min"
+	echo "  3) full, 60 min: the most reliable result"
+	ask "Number [1]: "
+	case "$answer" in
+		""|1) minutes=5 ;;
+		2) minutes=20 ;;
+		3) minutes=60 ;;
+		*) die "choose 1, 2 or 3" ;;
+	esac
+}
+
+follow() {
+	tail -n +1 -f "$LOG" &
+	tail_pid=$!
+	trap 'kill "$tail_pid" 2>/dev/null; echo; echo "The search continues in the background: adf-router status"; exit 0' INT
+	started=$(date +%s)
+	next=60
+	while is_running; do
+		sleep 2
+		elapsed=$(($(date +%s) - started))
+		if [ "$elapsed" -ge "$next" ]; then
+			printf 'still working: %d of up to %s min. Ctrl+C leaves it running in the background.\n' \
+				"$((elapsed / 60))" "$1"
+			next=$((next + 60))
+		fi
+	done
+	kill "$tail_pid" 2>/dev/null
+	trap - INT
+}
+
+cmd_check() {
+	service=""
+	minutes=""
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--minutes) [ $# -ge 2 ] || die "--minutes needs a value"; minutes=$2; shift 2 ;;
+			--) shift; break ;;
+			-*) die "unknown option $1 (see: adf-router help)" ;;
+			*) service=$1; shift ;;
+		esac
+	done
+	is_running && die "a search is already running (adf-router status)"
+	if [ -z "$service" ] || [ -z "$minutes" ]; then
+		( : <"$TTY" ) 2>/dev/null || die "no terminal: pass both, e.g. adf-router check youtube --minutes 5"
+		exec 3<"$TTY"
+		[ -n "$service" ] || choose_service
+		[ -n "$minutes" ] || choose_minutes
+		exec 3<&-
+	fi
+	# Current Tachyon strategies become candidates, so the search also measures what is in use.
+	"$BIN_DIR/adf" import >/dev/null 2>&1
+	report="$REPORTS/run-$(date +%Y%m%d-%H%M%S).md"
+	"$BIN_DIR/adf-router" run --categories "$service" --minutes "$minutes" --report "$report" -- "$@" || exit 1
+	echo
+	follow "$minutes"
+	echo
+	[ -f "$report" ] || die "the search ended without a report, see: adf-router log"
+	cat "$report"
+	echo
+	echo "Strategies with ids: adf-router best"
+	echo "Apply one:           adf apply --section <section> <id> --dry-run"
+	echo "Nothing was changed in Tachyon."
 }
 
 cmd_status() {
@@ -227,6 +330,7 @@ cmd_uninstall() {
 case "${1:-help}" in
 	__install) shift; cmd_install "$@" ;;
 	__worker) shift; cmd_worker "$@" ;;
+	check) shift; cmd_check "$@" ;;
 	run) shift; cmd_run "$@" ;;
 	status) cmd_status ;;
 	log) shift; cmd_log "$@" ;;

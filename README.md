@@ -89,38 +89,41 @@ nftables, маршрутизация и UCI не трогаются. Конфи�
 
 ## Запуск на самом роутере
 
-ПК нужен только для сборки: поиск работает на роутере в фоне и не зависит от SSH-сессии.
-Сборка, на ПК (нужен только Python, файл появится в `dist/`):
+Одна команда в SSH роутера ставит всё необходимое и запускает проверку:
 
 ```sh
-python packaging/build_release.py
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/p0sixxx/advanced-dpi-fuzzer/ccr-1c98da7f-ufeaio/install.sh)"
 ```
 
-Установка, из Git Bash, WSL или Linux (PowerShell не поддерживает `<`):
+Команда скачивает ADF с GitHub, ставит Python через `apk` или `opkg`, разворачивает всё в `/opt/adf`,
+спрашивает сервис и длительность проверки (5, 20 или 60 минут) и в конце показывает отчёт. Tachyon,
+firewall и маршруты она не меняет. Повторный запуск обновляет ADF и не трогает настройки
+в `/etc/adf/config.toml` и результаты в `/root/.adf`.
+
+Поиск идёт в фоне: Ctrl+C и обрыв SSH его не останавливают, ход и результат доступны в `adf-router`.
 
 ```sh
-ssh root@192.168.8.1 "cat > /tmp/adf-router.sh" < dist/adf-router-0.1.0.sh
-ssh -t root@192.168.8.1 sh /tmp/adf-router.sh
-```
-
-Установщик ставит Python через `apk` или `opkg` (флаг `--no-deps` запрещает это) и разворачивает ADF
-в `/opt/adf`. Tachyon, firewall и маршруты он не меняет. Повторный запуск обновляет ADF, не трогая
-настройки в `/etc/adf/config.toml` и результаты в `/root/.adf`. Дальше команды выполняются на роутере:
-
-```sh
-adf-router run                                    # youtube,discord, до 60 минут, в фоне
-adf-router run --categories discord --minutes 30
+adf-router check                                  # проверка с выбором сервиса
+adf-router check youtube --minutes 5              # без вопросов
 adf-router status                                 # идёт ли поиск и последние строки лога
 adf-router log -f
 adf-router stop                                   # данные сохраняются
 adf-router report                                 # последний отчёт
-adf-router best
+adf-router best                                   # лучшие стратегии с id
 adf-router uninstall                              # --purge удалит и результаты
 ```
 
 `adf` на роутере работает как обычно: `adf import`, `adf compare ...`, `adf apply ...`. Конфигурацию
 Tachyon меняет только `adf apply`, и только после подтверждения. База на роутере своя, результаты с
 ПК в неё не попадают.
+
+Без доступа к GitHub установщик можно собрать на ПК и скопировать на роутер (Git Bash, WSL или Linux):
+
+```sh
+python packaging/build_release.py
+ssh root@192.168.8.1 "cat > /tmp/adf-router.sh" < dist/adf-router-0.1.0.sh
+ssh -t root@192.168.8.1 sh /tmp/adf-router.sh
+```
 
 ## Как Tachyon читает настройки Native Desync
 
@@ -158,8 +161,8 @@ YouTube Music, googlevideo, Discord, Telegram, GitHub, Cloudflare (+ контр�
 * `adf compare` перезапускает движок каждый раунд, поэтому Adaptive 2.0 измеряется с холодного старта.
 * Цель `youtube-video` проверяет прохождение TLS к googlevideo, а не скорость видеопотока.
 * `adf run` и `adf compare` без терминала (скрипты, агенты) требуют `--yes`.
-* Установщик для роутера (`dist/adf-router-*.sh`) проверен тестами на имитации роутера (`sh`, busybox
-  `ash`, поддельный `apk`), но ещё не устанавливался на настоящий OpenWrt.
+* Установка на роутер (`install.sh`, `dist/adf-router-*.sh`) проверена тестами на имитации роутера
+  (`sh`, busybox `ash`, поддельные `apk` и `curl`), но ещё не запускалась на настоящем OpenWrt.
 * Тесты рассчитаны на Linux: на Windows запускайте их в WSL (e2e-тесты агента там не работают).
 * zapret/zapret2: генерация, валидация и экспорт есть; прямое измерение через `adf-agent run` — нет
   (nfqws требует правил nfqueue). Агент умеет делегировать одну пробу встроенному фаззеру Tachyon
