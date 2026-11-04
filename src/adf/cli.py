@@ -293,12 +293,16 @@ def cmd_import(args: argparse.Namespace) -> int:
     cfg = _cfg(args)
     parsed = tachyon_int.parse_uci_show(_uci_text(cfg, args))
     store = Store(cfg.db)
+    inactive = tachyon_int.inactive_desync_sources(parsed)
     out = []
     for sid in tachyon_int.desync_sections(parsed):
         imp = tachyon_int.section_to_params(sid, parsed[sid])
         item: Dict[str, Any] = {"section": sid, "kind": imp.kind, "auto_tune": imp.auto_tune,
-                                "tachyon_core_outbound": imp.outbound, "notes": imp.notes}
-        if imp.params:
+                                "configured_outbound" if sid in inactive else "tachyon_core_outbound": imp.outbound,
+                                "notes": imp.notes}
+        if sid in inactive:
+            item["inactive"] = inactive[sid]
+        elif imp.params:
             s = make_strategy(TachyonDesync(), imp.params, origin="import", name=f"tachyon:{sid}")
             item.update({"strategy_id": s.id, "text": s.text})
             store.upsert_strategy(s)
@@ -367,7 +371,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
             if sid not in parsed:
                 raise SystemExit(f"section {sid} not found in tachyon config")
             imp = tachyon_int.section_to_params(sid, parsed[sid])
-            variants.append(Variant(f"current: {sid}", outbound=imp.outbound))
+            reason = tachyon_int.inactive_desync_sources(parsed).get(sid)
+            if reason:
+                eprint(f"warning: {sid} is not what Tachyon runs ({reason})")
+            variants.append(Variant(f"{'inactive' if reason else 'current'}: {sid}", outbound=imp.outbound))
     for i, text in enumerate(args.strategy or [], 1):
         ref, _, label = text.partition("::")
         s = _resolve_strategy(store, ref)

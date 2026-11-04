@@ -11,10 +11,9 @@ body_regex = "ytcfg"
 
 [[target]]
 id = "youtube-video"
-url = "https://rr1.googlevideo.com/videoplayback"
+url = "https://redirector.googlevideo.com/"
 category = "youtube"
-kind = "streaming"
-range = "0-65535"
+ok_codes = [200, 204, 301, 302, 400, 403, 404, 405]
 required = false
 
 [[target]]

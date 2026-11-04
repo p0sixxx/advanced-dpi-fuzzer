@@ -32,10 +32,12 @@ ALL_DESYNC_OPTIONS = sorted(set(OPTION_FOR_KEY.values()) | {"desync_preset", "de
 _LINE = re.compile(r"^([A-Za-z0-9_-]+)\.([A-Za-z0-9_@\[\]-]+)(?:\.([A-Za-z0-9_-]+))?=(.*)$")
 
 
-# Only these lines are fetched from the router: section types and desync-related
-# options. Subscription URLs, keys and other options never leave the router.
+# Only these lines are fetched from the router: section types, desync-related options
+# and references between sections (ids only). Subscription URLs, keys and other options
+# never leave the router.
 UCI_FILTER = (r"^tachyon\.[^.=]+=(section|outbound_source)$|"
-              r"^tachyon\.[^.=]+\.(action|source_type|desync_[a-z0-9_]+)=")
+              r"^tachyon\.[^.=]+\.(action|source_type|outbound_source_refs|source_refs|outbound_group_levels|"
+              r"desync_[a-z0-9_]+)=")
 SHOW_DESYNC_CMD = f"uci -q show {CONFIG} | grep -E '{UCI_FILTER}'"
 
 
@@ -90,6 +92,44 @@ def desync_sections(cfg: Mapping[str, Mapping[str, Any]]) -> List[str]:
                 (t == "outbound_source" and opts.get("source_type") == "desync"):
             res.append(sid)
     return res
+
+
+def _id_list(opts: Mapping[str, Any], key: str) -> List[str]:
+    value = opts.get(key, [])
+    return [value] if isinstance(value, str) else list(value)
+
+
+def _uses_own_desync_options(opts: Mapping[str, Any]) -> bool:
+    return opts.get("action") == "desync" and bool(opts.get("desync_preset") or opts.get("desync_opts"))
+
+
+def inactive_desync_sources(cfg: Mapping[str, Mapping[str, Any]]) -> Dict[str, str]:
+    """Desync outbound sources whose options never reach tachyon-core, with the reason.
+
+    A section with action=desync builds its outbound from its own desync_* options: a source
+    linked through outbound_source_refs adds nothing, not even options the section leaves
+    unset (checked against the generated /etc/tachyon-core/config.json). Sources used by
+    other sections, groups or balancers do reach the core.
+    """
+    shadowed_by: Dict[str, List[str]] = {}
+    used = set()
+    for sid, opts in cfg.items():
+        for ref in _id_list(opts, "outbound_source_refs"):
+            if _uses_own_desync_options(opts):
+                shadowed_by.setdefault(ref, []).append(sid)
+            else:
+                used.add(ref)
+        used.update(_id_list(opts, "source_refs"))
+        used.update(_id_list(opts, "outbound_group_levels"))
+    out = {}
+    for sid in desync_sections(cfg):
+        if cfg[sid].get(".type") != "outbound_source" or sid in used:
+            continue
+        if sid in shadowed_by:
+            out[sid] = f"ignored: {', '.join(shadowed_by[sid])} uses its own desync_* options"
+        else:
+            out[sid] = "not referenced by any section"
+    return out
 
 
 
@@ -217,6 +257,8 @@ def section_to_params(sid: str, opts: Mapping[str, Any], engine: Optional[Tachyo
     """
     tcp_engine = TachyonDesync()
     ob, notes, ignored = section_outbound(opts, engine)
+    if _uses_own_desync_options(opts) and _id_list(opts, "outbound_source_refs"):
+        notes.append(f"linked outbound sources are ignored: {', '.join(_id_list(opts, 'outbound_source_refs'))}")
     auto_tune = ob.get("auto_tune")
     preset = ob.get("preset")
     if preset == "auto":
@@ -309,7 +351,7 @@ def uci_commands(section: str, options: Mapping[str, Optional[str]], config: str
     for opt in sorted(options):
         val = options[opt]
         if val is None:
-            cmds.append(f"uci -q delete {config}.{section}.{opt}")
+            cmds.append(f"uci -q delete {config}.{section}.{opt} || true")  # absent option: non-zero exit under set -e
         else:
             cmds.append(f"uci set {config}.{section}.{opt}={shlex.quote(val)}")
     return cmds
@@ -351,6 +393,10 @@ def plan_apply(current_uci_show: str, section: str, strategy: Strategy, reload: 
         raise ValueError(f"section '{section}' not found in tachyon config")
     if section not in desync_sections(cfg):
         raise ValueError(f"section '{section}' is not a Native Desync section (action=desync / source_type=desync)")
+    inactive = inactive_desync_sources(cfg)
+    if section in inactive:
+        raise ValueError(f"outbound source '{section}' has no effect on tachyon-core ({inactive[section]}); "
+                         "apply to the section that owns the options instead")
     new = export_options(strategy)
     backup = {k: v for k, v in backup_options(cfg, section).items() if k in new}
     return ApplyPlan(section, strategy.id, new, backup, shell_script(uci_commands(section, new), reload),

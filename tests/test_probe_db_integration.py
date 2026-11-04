@@ -1,4 +1,6 @@
 import json
+import re
+import subprocess
 
 import pytest
 
@@ -299,6 +301,67 @@ def test_parse_uci_show_multiline_and_quotes():
     assert cfg["sub"]["name"] == "it's" and cfg["sub"]["json"].startswith('{"a"')
     assert ti.desync_sections(cfg) == ["yt"]
     assert "desync_" in ti.SHOW_DESYNC_CMD and "grep -E" in ti.SHOW_DESYNC_CMD
+
+
+UCI_SOURCES = """tachyon.Discord=section
+tachyon.Discord.action='desync'
+tachyon.Discord.desync_preset='custom'
+tachyon.Discord.desync_mode='fake_split'
+tachyon.Discord.outbound_source_refs='tail'
+tachyon.Main=section
+tachyon.Main.action='connection'
+tachyon.Main.outbound_source_refs='used' 'sub'
+tachyon.grp.source_refs='pooled'
+tachyon.sub=outbound_source
+tachyon.sub.source_type='subscription'
+tachyon.tail=outbound_source
+tachyon.tail.source_type='desync'
+tachyon.tail.desync_mode='fake_disorder'
+tachyon.used=outbound_source
+tachyon.used.source_type='desync'
+tachyon.used.desync_mode='split'
+tachyon.pooled=outbound_source
+tachyon.pooled.source_type='desync'
+tachyon.pooled.desync_mode='split'
+tachyon.orphan=outbound_source
+tachyon.orphan.source_type='desync'
+tachyon.orphan.desync_mode='split'
+"""
+
+
+def test_inactive_desync_sources():
+    cfg = ti.parse_uci_show(UCI_SOURCES)
+    inactive = ti.inactive_desync_sources(cfg)
+    assert set(inactive) == {"tail", "orphan"}
+    assert "Discord" in inactive["tail"] and "not referenced" in inactive["orphan"]
+    assert any("tail" in n for n in ti.section_to_params("Discord", cfg["Discord"]).notes)
+
+
+def test_apply_refuses_source_without_effect():
+    s = from_text(TachyonDesync(), "mode=split split_pos=1")
+    with pytest.raises(ValueError, match="no effect on tachyon-core"):
+        ti.plan_apply(UCI_SOURCES, "tail", s)
+    assert ti.plan_apply(UCI_SOURCES, "used", s).section == "used"
+    assert ti.plan_apply(UCI_SOURCES, "Discord", s).section == "Discord"
+
+
+def test_uci_filter_keeps_references_and_drops_secrets():
+    pattern = re.compile(ti.UCI_FILTER)
+    for line in ("tachyon.Main.outbound_source_refs='src'", "tachyon.grp.source_refs='src'",
+                 "tachyon.bal.outbound_group_levels='src'", "tachyon.yt.desync_mode='split'"):
+        assert pattern.search(line), line
+    for line in ("tachyon.sub.url='https://example.org/token'", "tachyon.sub.access_token='x'"):
+        assert not pattern.search(line), line
+
+
+def test_apply_script_survives_absent_options(tmp_path):
+    """`uci -q delete` of an absent option fails: under set -e that used to stop the script before commit."""
+    s = from_text(TachyonDesync(), "mode=split split_pos=1")
+    script = ti.plan_apply(UCI_SHOW, "yt", s, reload=False).script
+    stub = 'uci() { [ "$1" != -q ]; }\n'
+    done = subprocess.run(["sh", "-c", stub + script + "\necho reached-end\n"], capture_output=True, text=True,
+                          cwd=tmp_path)
+    assert done.returncode == 0 and "reached-end" in done.stdout
 
 
 def test_caps_negative_controls():

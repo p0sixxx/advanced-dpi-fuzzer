@@ -10,6 +10,12 @@
 * Правила `seqovl` приведены к zapret/zapret2: ограничение «меньше первой позиции» только для
   disorder-режимов; nfqws2: рецепт `ts_up` и `seqovl_pattern`.
 * Цели Instagram.
+* Цель `youtube-video` указывает на `redirector.googlevideo.com`: `rr1.googlevideo.com` не
+  существует (NXDOMAIN), и видео-цель всегда исключалась. Проверяется только TLS, не скорость потока.
+* `adf import`, `adf compare --current`, `adf apply` различают desync-источники, которые не доходят
+  до tachyon-core: секция с `action=desync` использует свои опции, а привязанный источник
+  игнорирует. `import` не добавляет их в кандидаты, `apply` отказывается в них писать.
+* `adf apply`: удаление отсутствующей опции больше не прерывает скрипт до `uci commit`.
 
 ## 0.1.0 — 2026-11-03
 

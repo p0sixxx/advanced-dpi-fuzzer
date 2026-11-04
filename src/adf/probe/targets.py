@@ -17,9 +17,10 @@ DEFAULT_TARGETS: List[Target] = [
     Target("google-www", "https://www.google.com/", "google", "Google Search", min_bytes=16384, body_regex="google"),
     Target("youtube-www", "https://www.youtube.com/", "youtube", "YouTube web", min_bytes=65536, body_regex="ytcfg"),
     Target("youtube-img", "https://i.ytimg.com/generate_204", "youtube", "YouTube static", required=False),
-    # same endpoint Tachyon's fuzzer uses (binaries.uc TARGET_SUITES.youtube_suite)
-    Target("youtube-video", "https://rr1.googlevideo.com/videoplayback", "youtube", "googlevideo CDN",
-           kind="streaming", range="0-65535", required=False),
+    # rr1.googlevideo.com (Tachyon's TARGET_SUITES.youtube_suite) is NXDOMAIN. The redirector shows
+    # whether TLS with a googlevideo SNI passes, not video throughput: real nodes are per-session.
+    Target("youtube-video", "https://redirector.googlevideo.com/", "youtube", "googlevideo redirector",
+           ok_codes=(200, 204, 301, 302, 400, 403, 404, 405), required=False),
     Target("ytmusic-www", "https://music.youtube.com/", "youtube_music", "YouTube Music", min_bytes=32768),
     Target("discord-www", "https://discord.com/", "discord", "Discord web", min_bytes=32768, body_regex="discord"),
     Target("discord-gw", "https://gateway.discord.gg/", "discord", "Discord gateway", ok_codes=(200, 400, 404, 426)),
