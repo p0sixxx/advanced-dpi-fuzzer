@@ -1,13 +1,13 @@
 #!/bin/sh
 # Advanced DPI Fuzzer: installs everything on the router and starts a check. In the router's SSH:
 #
-#   sh -c "$(curl -fsSL https://raw.githubusercontent.com/p0sixxx/advanced-dpi-fuzzer/ccr-1c98da7f-ufeaio/install.sh)"
+#   sh -c "$(curl -fsSL https://raw.githubusercontent.com/p0sixxx/advanced-dpi-fuzzer/main/install.sh)"
 #
 # Asks which service to check. Installs Python (apk/opkg) and ADF into /opt/adf; Tachyon, firewall
 # and routing stay as they are. Options (with `sh -s -- ...`): --no-check, --no-deps, --force, [service].
 
 ADF_REPO="${ADF_REPO:-p0sixxx/advanced-dpi-fuzzer}"
-ADF_REF="${ADF_REF:-ccr-1c98da7f-ufeaio}"
+ADF_REF="${ADF_REF:-main}"
 
 fail() { printf 'adf install: %s\n' "$*" >&2; exit 1; }
 

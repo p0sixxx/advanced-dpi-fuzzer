@@ -1,6 +1,7 @@
-# Target list. Fields: id, url, category, name, required, kind (https|streaming|quic),
+# Target list. Fields: id, url, category, name, required, kind (https|streaming|quic|tls_large),
 # min_bytes, range, ok_codes, body_regex (no spaces), min_speed_kbps, families, max_ips.
-# A strategy is judged by its worst *required* target.
+# A strategy is judged by its worst *required* target. Each required https target also gets a
+# "<id>-large" probe with a browser-size ClientHello ([probe] large_hello = false turns this off).
 
 [[target]]
 id = "youtube-www"
@@ -14,7 +15,6 @@ id = "youtube-video"
 url = "https://redirector.googlevideo.com/"
 category = "youtube"
 ok_codes = [200, 204, 301, 302, 400, 403, 404, 405]
-required = false
 
 [[target]]
 id = "ytmusic-www"

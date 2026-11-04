@@ -13,16 +13,22 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import queue
 import random
+import re
 import shlex
+import socket
 import subprocess
+import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from ..engines import ByeDPI, Engine, TachyonDesync
 from ..engines.tachyon_desync import FAKE_MODES
-from .model import BatchResult, ProbeResult, Target, classify
+from .hello import PROXY_TIMEOUT_S, ProxyFailure, Stream, client_hello, exchange, socks5_open
+from .model import LARGE_HELLO, BatchResult, ProbeResult, Target, classify
 
 AGENT_PATH = Path(os.environ.get("ADF_AGENT_PATH") or Path(__file__).resolve().parents[3] / "agent" / "adf-agent.sh")
 TACHYON_BYPASS_MARK = 0x08000000  # NFT_OUTBOUND_MARK in Tachyon (service/lifecycle.uc)
@@ -49,8 +55,73 @@ class Transport:
     def call(self, args: Sequence[str], stdin: str = "", timeout: float = 600) -> str:
         raise NotImplementedError
 
+    def connect(self, host: str, port: int, timeout: float) -> Stream:
+        """A TCP connection opened from the agent's host."""
+        raise NotImplementedError
+
     def describe(self) -> str:
         raise NotImplementedError
+
+
+class SocketStream:
+    def __init__(self, sock: socket.socket):
+        self.sock = sock
+        self.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+    def send(self, data: bytes) -> None:
+        self.sock.sendall(data)
+
+    def recv(self, n: int, timeout: float) -> bytes:
+        self.sock.settimeout(timeout)
+        return self.sock.recv(n)
+
+    def close(self) -> None:
+        self.sock.close()
+
+
+class SSHStream:
+    """A TCP connection opened by the router's sshd (``ssh -W``); pipes cannot be polled on Windows."""
+
+    def __init__(self, cmd: Sequence[str]):
+        self.proc = subprocess.Popen(list(cmd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, bufsize=0)
+        self.chunks: "queue.Queue[bytes]" = queue.Queue()
+        self.pending = b""
+        threading.Thread(target=self._read, daemon=True).start()
+
+    def _read(self) -> None:
+        while True:
+            try:
+                data = self.proc.stdout.read(65536)
+            except (OSError, ValueError):
+                data = b""
+            self.chunks.put(data or b"")
+            if not data:
+                return
+
+    def send(self, data: bytes) -> None:
+        self.proc.stdin.write(data)
+
+    def recv(self, n: int, timeout: float) -> bytes:
+        if not self.pending:
+            try:
+                self.pending = self.chunks.get(timeout=max(timeout, 0.001))
+            except queue.Empty:
+                raise TimeoutError from None
+            if not self.pending:
+                self.chunks.put(b"")    # end of stream stays visible to later calls
+                return b""
+        data, self.pending = self.pending[:n], self.pending[n:]
+        return data
+
+    def close(self) -> None:
+        self.proc.kill()
+        self.proc.wait()
+        for pipe in (self.proc.stdin, self.proc.stdout):
+            try:
+                pipe.close()
+            except OSError:
+                pass
 
 
 @dataclass
@@ -71,6 +142,9 @@ class LocalTransport(Transport):
             raise BackendError(f"agent {' '.join(args)} failed (rc={p.returncode}): {p.stderr.strip()[:500]}"
                                f" {p.stdout.strip()[:300]}")
         return p.stdout
+
+    def connect(self, host: str, port: int, timeout: float) -> Stream:
+        return SocketStream(socket.create_connection((host, port), timeout=timeout))
 
     def shell(self, cmd: str, stdin: str = "", timeout: float = 120) -> str:
         p = _run(["sh", "-c", cmd], stdin, timeout)
@@ -97,6 +171,7 @@ class SSHTransport(Transport):
     remote_agent: str = "/tmp/adf-agent.sh"
     ssh: str = "ssh"
     extra_opts: Sequence[str] = ()
+    core: str = ""
 
     def _base(self) -> List[str]:
         cmd = [self.ssh, "-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-p", str(self.port)]
@@ -117,6 +192,8 @@ class SSHTransport(Transport):
 
     def call(self, args: Sequence[str], stdin: str = "", timeout: float = 600) -> str:
         remote = "sh " + shlex.quote(self.remote_agent) + " " + " ".join(shlex.quote(a) for a in args)
+        if self.core:
+            remote = f"ADF_CORE={shlex.quote(self.core)} {remote}"
         try:
             p = _run(self._base() + [remote], stdin, timeout)
         except subprocess.TimeoutExpired as e:
@@ -124,6 +201,11 @@ class SSHTransport(Transport):
         if p.returncode != 0:
             raise BackendError(f"ssh agent {' '.join(args)} failed (rc={p.returncode}): {p.stderr.strip()[:500]}")
         return p.stdout
+
+    def connect(self, host: str, port: int, timeout: float) -> Stream:
+        cmd = self._base()
+        address = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+        return SSHStream(cmd[:-1] + ["-q", "-W", address, cmd[-1]])
 
     def shell(self, cmd: str, stdin: str = "", timeout: float = 120) -> str:
         p = _run(self._base() + [cmd], stdin, timeout)
@@ -282,12 +364,83 @@ class AgentBackend(Backend):
 
     def run_batch(self, engine: Engine, params: Optional[Mapping[str, Any]], targets: Sequence[Target],
                   ips: Mapping[str, Sequence[str]], reps: int = 1, stop_on_fail: bool = False) -> BatchResult:
-        return self._run(self.build_job(engine, params, targets, ips, reps, stop_on_fail), targets, ips, reps)
+        def job(ts: Sequence[Target]) -> str:
+            return self.build_job(engine, params, ts, ips, reps, stop_on_fail)
+        through_engine = params is not None or self.settings.baseline_via_core
+        return self._measure(job, targets, ips, reps, stop_on_fail, through_engine)
 
     def run_raw_outbound(self, outbound: Mapping[str, Any], targets: Sequence[Target],
                          ips: Mapping[str, Sequence[str]], reps: int = 1) -> BatchResult:
-        job = self.build_job(TachyonDesync(), None, targets, ips, reps, raw_outbound=outbound)
-        return self._run(job, targets, ips, reps)
+        def job(ts: Sequence[Target]) -> str:
+            return self.build_job(TachyonDesync(), None, ts, ips, reps, raw_outbound=outbound)
+        return self._measure(job, targets, ips, reps, False, True)
+
+    def _measure(self, job: Callable[[Sequence[Target]], str], targets: Sequence[Target],
+                 ips: Mapping[str, Sequence[str]], reps: int, stop_on_fail: bool, through_engine: bool) -> BatchResult:
+        large = [t for t in targets if t.kind == LARGE_HELLO]
+        plain = [t for t in targets if t.kind != LARGE_HELLO]
+        batch = self._run(job(plain), plain, ips, reps) if plain or not large else BatchResult(ok=True)
+        if large and batch.ok and not (stop_on_fail and any(not r.ok for r in batch.results)):
+            self._large_hellos(job([]) if through_engine else None, large, ips, reps, stop_on_fail, batch)
+        return batch
+
+    def _large_hellos(self, job: Optional[str], targets: Sequence[Target], ips: Mapping[str, Sequence[str]],
+                      reps: int, stop_on_fail: bool, batch: BatchResult) -> None:
+        s = self.settings
+        addresses = [(t, fam, ip) for t in targets for fam in t.families
+                     for ip in ([a for a in ips.get(t.id, []) if (":" in a) == (fam == "ipv6")][: max(1, t.max_ips)]
+                                or ["-"])]
+        if job is not None:
+            per_probe = PROXY_TIMEOUT_S + s.connect_timeout_s + s.interval_ms / 1000 + 1
+            hold_s = 30 + int(per_probe * reps * len(addresses))
+            for item in parse_lines(self.transport.call(["hold", str(hold_s)], stdin=job,
+                                                        timeout=30 + s.engine_start_s)):
+                if item.get("t") == "engine" and not item.get("ok"):
+                    batch.ok = False
+                    batch.engine_error = str(item.get("error", "engine failed"))
+                    return
+                if item.get("t") == "error":
+                    raise BackendError(f"agent error: {item.get('error')}")
+        results: List[ProbeResult] = []
+        try:
+            for rep in range(1, reps + 1):
+                for t, fam, ip in addresses:
+                    r = self._large_hello(t, fam, ip, rep, job is not None)
+                    results.append(r)
+                    time.sleep(s.interval_ms / 1000)
+                    if stop_on_fail and not r.ok:
+                        return
+        finally:
+            batch.results.extend(results)
+            if job is not None:
+                self.transport.call(["stop"], timeout=30)
+        if results and all(r.verdict == "proxy_error" for r in results):
+            raise BackendError(f"large hellos cannot reach the temporary engine: {results[0].error}. "
+                               "Allow TCP forwarding in the router's SSH server or set [probe] large_hello = false")
+
+    def _large_hello(self, t: Target, fam: str, ip: str, rep: int, through_engine: bool) -> ProbeResult:
+        s = self.settings
+        address = t.host if ip == "-" else ip
+        explicit = re.match(r"^https?://[^/:]+:(\d+)", t.url)
+        port = int(explicit.group(1)) if explicit else 443
+        result = ProbeResult(target=t.id, family=fam, ip="" if ip == "-" else ip, verdict="proxy_error", rep=rep)
+        try:
+            stream = (self.transport.connect("127.0.0.1", s.port, PROXY_TIMEOUT_S) if through_engine
+                      else self.transport.connect(address, port, s.connect_timeout_s))
+        except OSError as e:
+            result.error = str(e)[:300]
+            return result
+        try:
+            if through_engine:
+                socks5_open(stream, address, port)
+            result.verdict, result.tls_ms, result.error = exchange(stream, client_hello(t.host), s.connect_timeout_s)
+            result.ttfb_ms = result.total_ms = result.tls_ms
+            result.http_code = 200 if result.ok else 0
+        except ProxyFailure as e:
+            result.error = str(e)[:300]
+        finally:
+            stream.close()
+        return result
 
     def _run(self, job: str, targets: Sequence[Target], ips: Mapping[str, Sequence[str]], reps: int) -> BatchResult:
         per_probe = self.settings.timeout_s + self.settings.interval_ms / 1000 + 1
@@ -407,6 +560,8 @@ class DPIModel:
             base *= 0.5  # fragments dropped by CGNAT
         if p.get("syndata") and target.category == "cloudflare":
             base *= 0.3
+        if target.kind == LARGE_HELLO and mode != "tlsrec" and "," not in pos and not pos.isdigit():
+            base *= 0.05    # one split at the SNI: it may be in the second segment
         return max(0.0, min(1.0, base))
 
 

@@ -15,3 +15,5 @@ venv/
 local/
 config.local.toml
 reports/
+/compare*.md
+/run*.md

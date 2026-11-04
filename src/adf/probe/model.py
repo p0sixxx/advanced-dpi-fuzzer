@@ -1,6 +1,6 @@
 """Targets and probe results.
 
-A *trial* is one HTTP(S) request to one target through one strategy. The verdict
+A *trial* is one HTTP(S) request or one large ClientHello to one target through one strategy. The verdict
 taxonomy separates DPI symptoms from problems that a desync strategy cannot fix
 (DNS, TCP reachability, server errors), so they are never counted against a
 strategy.
@@ -33,6 +33,7 @@ DPI_VERDICTS = frozenset({
 })
 PATH_VERDICTS = frozenset({"dns_fail", "connect_failed", "proxy_error"})
 SERVER_VERDICTS = frozenset({"server_error"})
+LARGE_HELLO = "tls_large"      # probed by the controller, see probe/hello.py
 
 
 @dataclass(frozen=True)
@@ -42,7 +43,7 @@ class Target:
     category: str = "custom"
     name: str = ""
     required: bool = True
-    kind: str = "https"            # https | streaming | quic
+    kind: str = "https"            # https | streaming | quic | tls_large
     min_bytes: int = 0
     range: Optional[str] = None
     ok_codes: Tuple[int, ...] = DEFAULT_OK_CODES
@@ -62,7 +63,7 @@ class Target:
             raise ValueError(f"target id '{self.id}' must match [A-Za-z0-9_.-]{{1,64}}")
         if not re.fullmatch(r"https?://[A-Za-z0-9.-]+(:\d+)?(/[^\s]*)?", self.url):
             raise ValueError(f"target {self.id}: invalid url '{self.url}'")
-        if self.kind not in ("https", "streaming", "quic"):
+        if self.kind not in ("https", "streaming", "quic", LARGE_HELLO):
             raise ValueError(f"target {self.id}: unknown kind {self.kind}")
         if self.range and not re.fullmatch(r"\d+-\d*", self.range):
             raise ValueError(f"target {self.id}: invalid range {self.range}")

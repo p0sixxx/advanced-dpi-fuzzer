@@ -282,6 +282,34 @@ sys.exit(subprocess.run(["sh", "-c", remote], input=data).returncode)
     assert _sh.which("sh")
 
 
+def test_ssh_transport_passes_the_requested_core(tmp_path):
+    import sys as _sys
+    from adf.probe.backend import SSHTransport
+    fake = tmp_path / "ssh"
+    fake.write_text(f"""#!{_sys.executable}
+import subprocess, sys
+sys.stdin.buffer.read()
+sys.exit(subprocess.run(["sh", "-c", sys.argv[-1]]).returncode)
+""")
+    fake.chmod(0o755)
+    remote_agent = tmp_path / "remote-agent.sh"
+    remote_agent.write_text('echo "$ADF_CORE"\n')
+    t = SSHTransport(host="192.0.2.1", ssh=str(fake), remote_agent=str(remote_agent), core="/tmp/core new")
+    assert t.call(["version"]).strip() == "/tmp/core new"
+
+
+def test_agent_does_not_replace_a_missing_requested_core(tmp_path):
+    import os
+    installed = tmp_path / "bin"
+    installed.mkdir()
+    (installed / "tachyon-core").write_text("#!/bin/sh\necho tachyon-core 9.9.9\n")
+    (installed / "tachyon-core").chmod(0o755)
+    path = f"{installed}{os.pathsep}{os.environ['PATH']}"
+    t = LocalTransport(env={"ADF_CORE": str(tmp_path / "missing"), "ADF_STATE": str(tmp_path / "state"), "PATH": path})
+    env = json.loads(t.call(["env"]).strip().splitlines()[-1])
+    assert env["core"] == "" and env["core_version"] == ""
+
+
 def test_fakeip_answers_are_discarded():
     from adf.probe.backend import usable_addresses
     assert usable_addresses(["198.18.0.5", "142.250.74.14", "fc00::12", "2a00:1450:4010:c0e::5d", "10.0.0.1",

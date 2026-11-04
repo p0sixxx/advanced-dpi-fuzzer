@@ -82,12 +82,16 @@ def compare_report(rows: Sequence[Mapping[str, Any]], meta: Mapping[str, Any]) -
     lines = [title, "",
              f"* Сеть: `{meta.get('network_id')}`; повторов на цель: {meta.get('reps')}; "
              f"порядок: чередование по кругу (одинаковые условия сети)",
+             f"* Ядро: `{meta.get('engine_version', '')}`",
              f"* Цели: {', '.join(meta.get('targets', []))}", "",
              "| Вариант | Класс | LB (худшая цель) | Успехов (мин. по целям) | TTFB p50 | Стратегия |",
              "|---|---|---:|---:|---:|---|"]
     for r in rows:
         lines.append(f"| {r['label']} | {r['class']} | {r['lb']:.3f} | {r['rate']:.3f} | {r['p50_ttfb_ms']} | "
                      f"`{r['text']}` |")
+    failed = [f"* {r['label']}: {r['error']}" for r in rows if r.get("error")]
+    if failed:
+        lines += ["", "Движок не запустился:", *failed]
     lines += ["", "LB — нижняя граница 95 % доверительного интервала Уилсона. Разница считается значимой, "
                   "только если интервалы не перекрываются."]
     return "\n".join(lines) + "\n"

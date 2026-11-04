@@ -43,7 +43,8 @@ def compare(store: Store, backend: Backend, engine: Engine, variants: Sequence[V
             controls: Sequence[Target], ips: Mapping[str, Sequence[str]], reps: int, network_id: str, guard: Guard,
             log: Callable[[str], None] = lambda m: None) -> Dict[str, Any]:
     guard.start()
-    run_id = store.start_run(network_id, engine.name, "", getattr(backend, "name", "?"),
+    core = str(backend.env().get("core_version") or "")
+    run_id = store.start_run(network_id, engine.name, core, getattr(backend, "name", "?"),
                              bool(getattr(backend, "simulated", False)),
                              {"compare": [v.label for v in variants], "reps": reps})
     epoch = store.current_epoch(network_id)
@@ -56,6 +57,7 @@ def compare(store: Store, backend: Backend, engine: Engine, variants: Sequence[V
         else:
             store.upsert_strategy(Strategy(engine="tachyon_raw", params_json=json.dumps(v.outbound, sort_keys=True),
                                            text=v.text, complexity=0.0, origin="compare", name=v.label, id=v.id))
+    rejected: Dict[str, str] = {}
     discarded = 0
     status = "finished"
     rnd = 0
@@ -71,6 +73,9 @@ def compare(store: Store, backend: Backend, engine: Engine, variants: Sequence[V
                     b = backend.run_raw_outbound(v.outbound or {}, targets, ips, reps=1)
                 guard.after_batch(len(b.results))
                 batch_results[v.id] = b
+                if b.engine_failed and v.id not in rejected:
+                    rejected[v.id] = b.engine_error
+                    log(f"{v.label}: {b.engine_error}")
             ctrl_ok = True
             if controls:
                 cb = backend.run_batch(engine, None, controls, ips, reps=1)
@@ -98,9 +103,10 @@ def compare(store: Store, backend: Backend, engine: Engine, variants: Sequence[V
     for v in variants:
         sc = scores[v.id]
         d = sc.to_dict()
-        d.update({"label": v.label, "text": v.text, "class": sc.classify(Thresholds())})
+        d.update({"label": v.label, "text": v.text, "class": sc.classify(Thresholds()), "error": rejected.get(v.id, "")})
         rows.append(d)
     summary = {"status": status, "simulated": sim, "rounds": rnd, "discarded_rounds": discarded, "rows": rows,
-               "targets": [t.id for t in targets], "reps": reps, "network_id": network_id, "run_id": run_id}
+               "targets": [t.id for t in targets], "reps": reps, "network_id": network_id, "run_id": run_id,
+               "engine_version": core}
     store.finish_run(run_id, status, summary)
     return summary

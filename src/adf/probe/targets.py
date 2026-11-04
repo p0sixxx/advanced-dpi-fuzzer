@@ -8,10 +8,11 @@ require ``min_bytes`` of 32 KB or more.
 from __future__ import annotations
 
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
-from .model import Target, target_from_dict
+from .model import LARGE_HELLO, Target, target_from_dict
 
 # KiB/s over a whole large response. Far below normal lines (the slowest healthy response measured
 # on a real router was 490), while throttled services crawl at a few dozen.
@@ -24,8 +25,9 @@ DEFAULT_TARGETS: List[Target] = [
     Target("youtube-img", "https://i.ytimg.com/generate_204", "youtube", "YouTube static", required=False),
     # rr1.googlevideo.com (Tachyon's TARGET_SUITES.youtube_suite) is NXDOMAIN. The redirector shows
     # whether TLS with a googlevideo SNI passes, not video throughput: real nodes are per-session.
+    # Required: a strategy that opens the page but not this host leaves videos spinning.
     Target("youtube-video", "https://redirector.googlevideo.com/", "youtube", "googlevideo redirector",
-           ok_codes=(200, 204, 301, 302, 400, 403, 404, 405), required=False),
+           ok_codes=(200, 204, 301, 302, 400, 403, 404, 405)),
     Target("ytmusic-www", "https://music.youtube.com/", "youtube_music", "YouTube Music", min_bytes=32768),
     Target("discord-www", "https://discord.com/", "discord", "Discord web", min_bytes=32768, body_regex="discord",
            min_speed_kbps=THROTTLED_KBPS),
@@ -48,6 +50,16 @@ DEFAULT_CONTROLS: List[Target] = [
     Target("control-ya", "https://ya.ru/", "control", "Yandex", required=True),
     Target("control-vk", "https://vk.com/", "control", "VK", required=True),
 ]
+
+
+def with_large_hello(targets: Iterable[Target]) -> List[Target]:
+    """Add a browser-size ClientHello probe for each required target: curl's hello says nothing about Chrome."""
+    res = list(targets)
+    for t in list(res):
+        if t.required and t.kind == "https":
+            res.append(replace(t, id=f"{t.id}-large", name=f"{t.name or t.id}, large hello", kind=LARGE_HELLO,
+                               min_bytes=0, range=None, body_regex=None, min_speed_kbps=0.0))
+    return res
 
 
 def load_targets(path: Path) -> Dict[str, List[Target]]:

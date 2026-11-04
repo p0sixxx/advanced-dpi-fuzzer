@@ -19,6 +19,7 @@ class RouterConfig:
     identity: Optional[str] = None
     remote_agent: str = "/tmp/adf-agent.sh"
     local: bool = False             # the controller runs on the router itself
+    core: str = ""                  # tachyon-core to measure instead of the installed one
 
 
 @dataclass
@@ -28,6 +29,7 @@ class ProbeConfig:
     connect_timeout_s: int = 4
     engine_start_s: int = 10        # slow routers need longer to open the temporary engine's port
     interval_ms: int = 250
+    large_hello: bool = True        # also probe with a browser-size ClientHello
     routing_mark: Optional[int] = 0x08000000
     dns_server: str = "77.88.8.8"
 

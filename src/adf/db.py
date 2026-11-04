@@ -176,6 +176,11 @@ class Store:
                  json.dumps(config, default=str)))
             return int(cur.lastrowid)
 
+    def last_engine_version(self, network_id: str, engine: str) -> str:
+        row = self.conn.execute("SELECT engine_version FROM runs WHERE network_id=? AND engine=? AND engine_version<>'' "
+                                "ORDER BY id DESC LIMIT 1", (network_id, engine)).fetchone()
+        return row[0] if row else ""
+
     def finish_run(self, run_id: int, status: str, summary: Mapping[str, Any]) -> None:
         with self.tx() as c:
             c.execute("UPDATE runs SET finished_at=?, status=?, summary=? WHERE id=?",

@@ -596,6 +596,11 @@ class Orchestrator:
         try:
             env = self._environment()
             self.epoch = self.store.current_epoch(self.cfg.network_id)
+            previous = self.store.last_engine_version(self.cfg.network_id, self.engine.name)
+            if previous and previous != self.engine_version:
+                # a strategy that worked on one core can fail outright on the next, with an identical config
+                self.epoch = self.store.new_epoch(self.cfg.network_id, f"core {previous} -> {self.engine_version}")
+                self.log(f"core changed ({previous} -> {self.engine_version}): earlier results carry less weight")
             self.run_id = self.store.start_run(self.cfg.network_id, self.engine.name, self.engine_version,
                                                getattr(self.backend, "name", "?"), self.simulated,
                                                {"targets": [t.id for t in self.all_targets],

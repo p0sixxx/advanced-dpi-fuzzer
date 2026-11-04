@@ -22,6 +22,10 @@
 #                                          the controller only calls this with an
 #                                          explicit --allow-tachyon-probe)
 #
+#   hold <seconds> <job               -> start the engine from a job and leave it
+#                                        running for a client on this host, at most
+#                                        <seconds>, until `stop`
+#
 # Environment overrides: ADF_STATE (/tmp/adf-agent), ADF_CORE (tachyon-core path),
 # ADF_BYEDPI (ciadpi path), ADF_MIN_MEM_KB (24576), ADF_CURL (curl).
 
@@ -48,7 +52,14 @@ find_bin() {
 	return 1
 }
 
-core_bin() { find_bin "$ADF_CORE" /usr/bin/tachyon-core tachyon-core; }
+core_bin() {
+	# a requested core must not be replaced by the installed one: the run would measure the wrong version
+	if [ -n "$ADF_CORE" ]; then
+		find_bin "$ADF_CORE"
+	else
+		find_bin /usr/bin/tachyon-core tachyon-core
+	fi
+}
 byedpi_bin() { find_bin "$ADF_BYEDPI" /opt/byedpi/ciadpi /usr/bin/ciadpi ciadpi; }
 
 mem_avail_kb() {
@@ -86,6 +97,10 @@ kill_engine() {
 			kill -9 "$pid" 2>/dev/null
 		fi
 		rm -f "$ADF_STATE/engine.pid"
+	fi
+	if [ -f "$ADF_STATE/hold.pid" ]; then
+		kill "$(cat "$ADF_STATE/hold.pid" 2>/dev/null)" 2>/dev/null
+		rm -f "$ADF_STATE/hold.pid"
 	fi
 }
 
@@ -241,10 +256,7 @@ probe_one() {
 		"$size" "$speed" "$(json_str "$rip")" "$content" "$minb" "$(json_str "$err")"
 }
 
-cmd_run() {
-	acquire_lock
-	trap cleanup EXIT
-	trap 'cleanup; exit 130' INT TERM
+read_job() {
 	ENGINE_KIND=none; PORT=11290; REPS=1; INTERVAL_MS=250; TIMEOUT=8; CONNECT_TIMEOUT=4; BYEDPI_ARGS=""; CACERT=""
 	STOP_ON_FAIL=0
 	ENGINE_START_S=10
@@ -283,6 +295,13 @@ cmd_run() {
 		printf '{"t":"error","error":"low memory","mem_avail_kb":%s}\n' "$avail"
 		exit 5
 	fi
+}
+
+cmd_run() {
+	acquire_lock
+	trap cleanup EXIT
+	trap 'cleanup; exit 130' INT TERM
+	read_job
 	if [ "$ENGINE_KIND" != "none" ]; then
 		start_engine "$ENGINE_KIND" "$PORT" || { printf '{"t":"done","ok":false}\n'; exit 0; }
 	fi
@@ -307,6 +326,23 @@ cmd_run() {
 	printf '{"t":"done","ok":true,"mem_avail_kb":%s}\n' "$(mem_avail_kb)"
 }
 
+cmd_hold() {
+	# the controller talks to the engine itself, then calls `stop`; if it disappears, the engine stops here
+	hold_s=$1
+	acquire_lock
+	trap release_lock EXIT
+	read_job
+	start_engine "$ENGINE_KIND" "$PORT" || { printf '{"t":"done","ok":false}\n'; exit 0; }
+	pid=$(cat "$ADF_STATE/engine.pid")
+	(
+		sleep "$hold_s"
+		rm -f "$ADF_STATE/hold.pid"
+		[ "$(cat "$ADF_STATE/engine.pid" 2>/dev/null)" = "$pid" ] && kill_engine
+	) </dev/null >/dev/null 2>&1 &
+	echo $! > "$ADF_STATE/hold.pid"
+	printf '{"t":"done","ok":true}\n'
+}
+
 cmd_tachyon_probe() {
 	[ -r /usr/lib/tachyon/diagnostics/fuzzer.uc ] || { printf '{"t":"error","error":"Tachyon fuzzer not installed"}\n'; exit 4; }
 	acquire_lock
@@ -320,7 +356,8 @@ case "$1" in
 	resolve) shift; cmd_resolve "$@" ;;
 	caps) cmd_caps ;;
 	run) cmd_run ;;
+	hold) shift; cmd_hold "$@" ;;
 	stop) ensure_state; kill_engine; release_lock; echo '{"t":"stopped"}' ;;
 	tachyon-probe) shift; cmd_tachyon_probe "$@" ;;
-	*) echo "usage: adf-agent {version|env|resolve|caps|run|stop|tachyon-probe}" >&2; exit 1 ;;
+	*) echo "usage: adf-agent {version|env|resolve|caps|run|hold|stop|tachyon-probe}" >&2; exit 1 ;;
 esac

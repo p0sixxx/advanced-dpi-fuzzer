@@ -21,7 +21,7 @@ from .integrations import tachyon_history
 from .learning import DecayPolicy, build_scores
 from .probe.backend import (AgentBackend, Backend, BackendError, DPIModel, LocalTransport, ProbeSettings,
                             SimulatedBackend, SSHTransport)
-from .probe.targets import DEFAULT_CONTROLS, DEFAULT_TARGETS, load_targets, select
+from .probe.targets import DEFAULT_CONTROLS, DEFAULT_TARGETS, load_targets, select, with_large_hello
 from .report import compare_report, run_report
 from .safety import Budget, Guard, SafetyPolicy
 from .search.compare import Variant, compare
@@ -52,11 +52,11 @@ def _cfg(args: argparse.Namespace) -> AppConfig:
 
 def _transport(cfg: AppConfig, args: argparse.Namespace):
     if getattr(args, "local", False) or cfg.router.local:
-        return LocalTransport()
+        return LocalTransport(env={"ADF_CORE": cfg.router.core} if cfg.router.core else None)
     if not cfg.router.host:
         raise SystemExit("no router configured: use --ssh root@192.168.8.1, --local, --simulate or [router] in config")
     return SSHTransport(host=cfg.router.host, user=cfg.router.user, port=cfg.router.port,
-                        identity=cfg.router.identity, remote_agent=cfg.router.remote_agent)
+                        identity=cfg.router.identity, remote_agent=cfg.router.remote_agent, core=cfg.router.core)
 
 
 def _backend(cfg: AppConfig, args: argparse.Namespace) -> Backend:
@@ -81,7 +81,7 @@ def _targets(cfg: AppConfig, args: argparse.Namespace) -> tuple:
         targets, controls = list(DEFAULT_TARGETS), list(DEFAULT_CONTROLS)
     cats = (args.categories.split(",") if getattr(args, "categories", None) else cfg.search.categories) or None
     ids = args.only.split(",") if getattr(args, "only", None) else None
-    targets = select(targets, cats, ids)
+    targets = select(with_large_hello(targets) if cfg.probe.large_hello else targets, cats, ids)
     if not targets:
         raise SystemExit("no targets selected")
     return targets, controls
@@ -361,7 +361,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     targets, controls = _targets(cfg, args)
     backend = _backend(cfg, args)
     store = Store(cfg.db)
-    eng = TachyonDesync()
+    eng = get_engine(TachyonDesync.name, measure_udp=True)     # like the strategies from _resolve_strategy
     variants: List[Variant] = []
     if not args.no_adaptive:
         variants.append(Variant("Tachyon Adaptive 2.0 (preset=auto)",
