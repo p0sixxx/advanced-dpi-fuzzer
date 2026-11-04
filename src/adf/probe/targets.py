@@ -13,16 +13,22 @@ from typing import Dict, Iterable, List, Optional, Sequence
 
 from .model import Target, target_from_dict
 
+# KiB/s over a whole large response. Far below normal lines (the slowest healthy response measured
+# on a real router was 490), while throttled services crawl at a few dozen.
+THROTTLED_KBPS = 128
+
 DEFAULT_TARGETS: List[Target] = [
     Target("google-www", "https://www.google.com/", "google", "Google Search", min_bytes=16384, body_regex="google"),
-    Target("youtube-www", "https://www.youtube.com/", "youtube", "YouTube web", min_bytes=65536, body_regex="ytcfg"),
+    Target("youtube-www", "https://www.youtube.com/", "youtube", "YouTube web", min_bytes=65536, body_regex="ytcfg",
+           min_speed_kbps=THROTTLED_KBPS),
     Target("youtube-img", "https://i.ytimg.com/generate_204", "youtube", "YouTube static", required=False),
     # rr1.googlevideo.com (Tachyon's TARGET_SUITES.youtube_suite) is NXDOMAIN. The redirector shows
     # whether TLS with a googlevideo SNI passes, not video throughput: real nodes are per-session.
     Target("youtube-video", "https://redirector.googlevideo.com/", "youtube", "googlevideo redirector",
            ok_codes=(200, 204, 301, 302, 400, 403, 404, 405), required=False),
     Target("ytmusic-www", "https://music.youtube.com/", "youtube_music", "YouTube Music", min_bytes=32768),
-    Target("discord-www", "https://discord.com/", "discord", "Discord web", min_bytes=32768, body_regex="discord"),
+    Target("discord-www", "https://discord.com/", "discord", "Discord web", min_bytes=32768, body_regex="discord",
+           min_speed_kbps=THROTTLED_KBPS),
     Target("discord-gw", "https://gateway.discord.gg/", "discord", "Discord gateway", ok_codes=(200, 400, 404, 426)),
     Target("telegram-web", "https://web.telegram.org/", "telegram", "Telegram Web", body_regex="[Tt]elegram"),
     Target("telegram-api", "https://api.telegram.org/", "telegram", "Telegram Bot API", required=False),
@@ -31,7 +37,7 @@ DEFAULT_TARGETS: List[Target] = [
     Target("instagram-cdn", "https://static.cdninstagram.com/", "instagram", "Instagram static CDN", required=False),
     Target("github-www", "https://github.com/", "github", "GitHub", min_bytes=65536, body_regex="github"),
     Target("cloudflare-100k", "https://speed.cloudflare.com/__down?bytes=102400", "cloudflare",
-           "Cloudflare sized download", min_bytes=102400),
+           "Cloudflare sized download", min_bytes=102400, min_speed_kbps=THROTTLED_KBPS),
     Target("cloudflare-www", "https://www.cloudflare.com/", "cloudflare", "Cloudflare web", min_bytes=32768,
            required=False),
 ]

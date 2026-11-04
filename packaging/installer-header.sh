@@ -1,7 +1,7 @@
 #!/bin/sh
 # Advanced DPI Fuzzer @VERSION@ for OpenWrt: self-extracting installer.
 #
-#   sh adf-router-@VERSION@.sh [--no-deps]
+#   sh adf-router-@VERSION@.sh [--no-deps] [--force]
 #
 # Installs Python (via apk/opkg, unless --no-deps) and ADF into /opt/adf. It does not touch
 # Tachyon, firewall or routing. A .tar.gz with the program follows this header.

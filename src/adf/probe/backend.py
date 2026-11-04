@@ -199,6 +199,7 @@ class ProbeSettings:
     port: int = 11290
     timeout_s: int = 8
     connect_timeout_s: int = 4
+    engine_start_s: int = 10
     interval_ms: int = 250
     routing_mark: Optional[int] = TACHYON_BYPASS_MARK
     dns_server: str = "77.88.8.8"   # same resolver Tachyon's fuzzer configures
@@ -236,7 +237,7 @@ class AgentBackend(Backend):
         s = self.settings
         lines = ["ADF-JOB 1", f"port {s.port}", f"reps {int(reps)}", f"interval_ms {int(s.interval_ms)}",
                  f"timeout {int(s.timeout_s)}", f"connect_timeout {int(s.connect_timeout_s)}",
-                 f"stop_on_fail {1 if stop_on_fail else 0}"]
+                 f"engine_start_s {int(s.engine_start_s)}", f"stop_on_fail {1 if stop_on_fail else 0}"]
         if s.cacert:
             lines.append(f"cacert {s.cacert}")
         if raw_outbound is not None:
@@ -291,7 +292,7 @@ class AgentBackend(Backend):
     def _run(self, job: str, targets: Sequence[Target], ips: Mapping[str, Sequence[str]], reps: int) -> BatchResult:
         per_probe = self.settings.timeout_s + self.settings.interval_ms / 1000 + 1
         n_probes = reps * sum(len(t.families) * max(1, t.max_ips) for t in targets)
-        out = self.transport.call(["run"], stdin=job, timeout=30 + per_probe * n_probes)
+        out = self.transport.call(["run"], stdin=job, timeout=30 + self.settings.engine_start_s + per_probe * n_probes)
         by_id = {t.id: t for t in targets}
         batch = BatchResult(ok=True)
         for item in parse_lines(out):

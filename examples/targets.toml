@@ -46,6 +46,7 @@ id = "cloudflare-100k"
 url = "https://speed.cloudflare.com/__down?bytes=102400"
 category = "cloudflare"
 min_bytes = 102400
+min_speed_kbps = 128
 families = ["ipv4", "ipv6"]
 
 # Controls must work WITHOUT any bypass; a failing control means the network is down.

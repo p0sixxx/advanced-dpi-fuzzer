@@ -208,6 +208,43 @@ def test_check_without_terminal_explains_itself(installer, tmp_path):
     assert done.returncode != 0 and "no terminal" in done.stderr
 
 
+def set_free_flash(r, megabytes):
+    r._tool("df", f'echo "Filesystem 1024-blocks Used Available Capacity Mounted"\n'
+                  f'echo "overlay 100 0 {megabytes * 1024} 0% /"\n')
+
+
+def test_not_enough_flash_stops_before_touching_anything(installer, tmp_path):
+    r = Router(tmp_path, "sh", python_installed=False)
+    set_free_flash(r, 10)
+    done = r.sh(str(installer))
+    assert done.returncode != 0 and "not enough flash: 10 MB free, 23 MB needed" in done.stderr
+    assert "over SSH" in done.stderr
+    assert not r.apk_log.exists() and not r.prefix.exists()
+
+
+def test_flash_check_counts_python_only_when_it_is_missing(installer, tmp_path):
+    r = Router(tmp_path, "sh")
+    set_free_flash(r, 10)
+    assert r.sh(str(installer)).returncode == 0
+
+
+def test_force_overrides_the_flash_check(installer, tmp_path):
+    r = Router(tmp_path, "sh", python_installed=False)
+    set_free_flash(r, 10)
+    done = r.sh(str(installer), "--force")
+    assert done.returncode == 0, done.stderr
+    assert "--force" in done.stdout and r.prefix.exists()
+
+
+def test_low_memory_warns_and_still_installs(installer, tmp_path):
+    r = Router(tmp_path, "sh")
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text("MemTotal: 256000 kB\nMemAvailable: 70000 kB\n")
+    r.env["ADF_MEMINFO"] = str(meminfo)
+    done = r.sh(str(installer))
+    assert done.returncode == 0 and "only 68 MB of memory" in done.stdout
+
+
 def test_damaged_installer_is_refused(installer, tmp_path):
     bad = tmp_path / "bad.sh"
     data = bytearray(installer.read_bytes())

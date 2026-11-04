@@ -13,6 +13,7 @@ remote_agent = "/tmp/adf-agent.sh"
 port = 11290                # localhost port of the temporary engine
 timeout_s = 8
 connect_timeout_s = 4
+engine_start_s = 10         # time for the temporary engine to open its port; raise on slow routers
 interval_ms = 250           # pause between requests
 routing_mark = 134217728    # 0x08000000: Tachyon's bypass mark (NFT_OUTBOUND_MARK)
 dns_server = "77.88.8.8"    # resolver used for CDN IPs (same as Tachyon's fuzzer)

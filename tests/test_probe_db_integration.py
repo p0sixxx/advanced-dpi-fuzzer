@@ -364,6 +364,13 @@ def test_apply_script_survives_absent_options(tmp_path):
     assert done.returncode == 0 and "reached-end" in done.stdout
 
 
+def test_slow_response_is_reported_as_throttled():
+    big = {"code": 200, "exit": 0, "size": 900_000, "content": 1}
+    youtube = next(t for t in DEFAULT_TARGETS if t.id == "youtube-www")
+    assert classify({**big, "speed": 60 * 1024}, youtube).verdict == "throttled"
+    assert classify({**big, "speed": 500 * 1024}, youtube).verdict == "ok"
+
+
 def test_caps_negative_controls():
     from adf.engines.tachyon_desync import caps_test_matrix, capabilities_from_probe
     tests = caps_test_matrix()

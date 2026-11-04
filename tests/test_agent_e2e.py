@@ -126,6 +126,16 @@ def test_stop_on_fail(backend):
     assert len(b.results) == 1
 
 
+def test_engine_start_limit_comes_from_the_job(backend):
+    be, port, env = backend
+    env["FAKE_CORE_NO_LISTEN"] = "1"
+    be.settings.engine_start_s = 1
+    blk, _ = targets(port)
+    b = be.run_batch(TachyonDesync(), {"mode": "split", "split_pos": "1"}, [blk], IPS)
+    env.pop("FAKE_CORE_NO_LISTEN")
+    assert b.engine_failed and "within 1s" in b.engine_error
+
+
 def test_engine_rejection_is_reported(backend):
     be, port, env = backend
     env["FAKE_CORE_REJECT"] = "fooling"

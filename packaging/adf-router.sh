@@ -9,7 +9,7 @@
 # configuration changes solely through `adf apply`, which asks for confirmation.
 #
 # Environment overrides (used by tests): ADF_PREFIX (/opt/adf), ADF_BIN_DIR (/usr/bin),
-# ADF_CONF_DIR (/etc/adf), ADF_TTY (/dev/tty).
+# ADF_CONF_DIR (/etc/adf), ADF_TTY (/dev/tty), ADF_MEMINFO (/proc/meminfo).
 
 PREFIX="${ADF_PREFIX:-/opt/adf}"
 BIN_DIR="${ADF_BIN_DIR:-/usr/bin}"
@@ -22,6 +22,10 @@ REPORTS="$STATE_DIR/reports"
 DEFAULT_CATEGORIES="youtube,discord"
 DEFAULT_MINUTES=60
 PY_LIGHT="python3-light python3-sqlite3 python3-decimal python3-urllib"
+NEED_FLASH_MB=3     # ADF, compiled bytecode, results database
+NEED_PYTHON_MB=20   # 14.4 MB of packages on OpenWrt 25.12, plus a margin
+LOW_MEMORY_MB=96    # search: controller 28 MB, temporary engine up to 46 MB, curl, agent's 24 MB reserve
+PC_HINT="Alternative: run ADF on a PC over SSH, the router then needs neither Python nor this space (see README)."
 PY_CHECK="import sys; assert sys.version_info >= (3, 11); import argparse, dataclasses, datetime, hashlib, ipaddress, json, pathlib, random, shlex, sqlite3, statistics, subprocess, tomllib"
 
 die() { printf 'adf-router: %s\n' "$*" >&2; exit 1; }
@@ -52,6 +56,35 @@ EOF
 }
 
 python_ok() { python3 -c "$PY_CHECK" >/dev/null 2>&1; }
+
+free_flash_mb() {
+	d=$PREFIX
+	while [ ! -d "$d" ]; do d=$(dirname "$d"); done
+	df -Pk "$d" 2>/dev/null | awk 'NR == 2 { print int($4 / 1024) }'
+}
+
+available_memory_mb() {
+	awk '/^MemAvailable:/ { print int($2 / 1024) }' "${ADF_MEMINFO:-/proc/meminfo}" 2>/dev/null
+}
+
+warn_low_memory() {
+	avail=$(available_memory_mb)
+	if [ -n "$avail" ] && [ "$avail" -lt "$LOW_MEMORY_MB" ]; then
+		echo "warning: only $avail MB of memory available, a search needs about $LOW_MEMORY_MB MB."
+		echo "$PC_HINT"
+	fi
+}
+
+preflight() {
+	need=$NEED_FLASH_MB
+	[ "$1" = 1 ] && need=$((need + NEED_PYTHON_MB))
+	free=$(free_flash_mb)
+	if [ -n "$free" ] && [ "$free" -lt "$need" ]; then
+		[ "$2" = 1 ] || die "not enough flash: $free MB free, $need MB needed (--force to try anyway). $PC_HINT"
+		echo "warning: only $free MB of flash free, $need MB needed; continuing because of --force."
+	fi
+	warn_low_memory
+}
 
 install_python() {
 	if command -v apk >/dev/null 2>&1; then
@@ -92,16 +125,27 @@ cmd_install() {
 	src=$1
 	shift
 	deps=1
-	[ "${1:-}" = "--no-deps" ] && deps=0
+	force=0
+	while [ $# -gt 0 ]; do
+		case "$1" in
+			--no-deps) deps=0 ;;
+			--force) force=1 ;;
+			*) die "unknown option $1" ;;
+		esac
+		shift
+	done
 	if [ -z "${ADF_PREFIX:-}" ] && [ "$(id -u)" != 0 ]; then
 		die "run as root"
 	fi
 	is_running && die "a search is running: stop it first (adf-router stop)"
 	command -v curl >/dev/null 2>&1 || die "curl is required"
-	if ! python_ok; then
+	if python_ok; then
+		preflight 0 "$force"
+	else
 		[ "$deps" = 1 ] || die "Python >= 3.11 with sqlite3 is required (--no-deps was given)"
+		preflight 1 "$force"
 		echo "Installing Python (once)..."
-		install_python || die "could not install Python: check the router's internet access and package feeds"
+		install_python || die "could not install Python >= 3.11: check the internet access, package feeds and firmware version. $PC_HINT"
 	fi
 	new="$PREFIX.new"
 	rm -rf "$new"
@@ -256,6 +300,7 @@ cmd_check() {
 		[ -n "$minutes" ] || choose_minutes
 		exec 3<&-
 	fi
+	warn_low_memory
 	# Current Tachyon strategies become candidates, so the search also measures what is in use.
 	"$BIN_DIR/adf" import >/dev/null 2>&1
 	report="$REPORTS/run-$(date +%Y%m%d-%H%M%S).md"

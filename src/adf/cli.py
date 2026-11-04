@@ -67,7 +67,8 @@ def _backend(cfg: AppConfig, args: argparse.Namespace) -> Backend:
         t.install()
     p = cfg.probe
     return AgentBackend(t, ProbeSettings(port=p.port, timeout_s=p.timeout_s, connect_timeout_s=p.connect_timeout_s,
-                                         interval_ms=p.interval_ms, routing_mark=p.routing_mark,
+                                         engine_start_s=p.engine_start_s, interval_ms=p.interval_ms,
+                                         routing_mark=p.routing_mark,
                                          dns_server=p.dns_server, cacert=getattr(args, "cacert", None)))
 
 

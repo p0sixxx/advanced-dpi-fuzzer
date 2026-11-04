@@ -26,6 +26,7 @@ class ProbeConfig:
     port: int = 11290
     timeout_s: int = 8
     connect_timeout_s: int = 4
+    engine_start_s: int = 10        # slow routers need longer to open the temporary engine's port
     interval_ms: int = 250
     routing_mark: Optional[int] = 0x08000000
     dns_server: str = "77.88.8.8"

@@ -121,6 +121,8 @@ def main():
         return 1
     if sys.argv[1] == "check":
         return 0
+    if os.environ.get("FAKE_CORE_NO_LISTEN"):
+        threading.Event().wait()
     inb = cfg["inbounds"][0]
     Handler.outbound = cfg["outbounds"][0]
     srv = Server((inb.get("listen", "127.0.0.1"), int(inb["listen_port"])), Handler)

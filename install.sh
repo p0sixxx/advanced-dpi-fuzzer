@@ -4,7 +4,7 @@
 #   sh -c "$(curl -fsSL https://raw.githubusercontent.com/p0sixxx/advanced-dpi-fuzzer/ccr-1c98da7f-ufeaio/install.sh)"
 #
 # Asks which service to check. Installs Python (apk/opkg) and ADF into /opt/adf; Tachyon, firewall
-# and routing stay as they are. Options (with `sh -s -- ...`): --no-check, --no-deps, [service].
+# and routing stay as they are. Options (with `sh -s -- ...`): --no-check, --no-deps, --force, [service].
 
 ADF_REPO="${ADF_REPO:-p0sixxx/advanced-dpi-fuzzer}"
 ADF_REF="${ADF_REF:-ccr-1c98da7f-ufeaio}"
@@ -27,7 +27,7 @@ main() {
 	while [ $# -gt 0 ]; do
 		case "$1" in
 			--no-check) check=0; shift ;;
-			--no-deps) deps="--no-deps"; shift ;;
+			--no-deps|--force) deps="$deps $1"; shift ;;
 			*) break ;;
 		esac
 	done
@@ -48,7 +48,7 @@ main() {
 	cp "$repo/packaging/adf-router.sh" "$tmp/root/bin/adf-router"
 	sed -n 's/^__version__ = "\(.*\)"$/\1/p' "$repo/src/adf/__init__.py" > "$tmp/root/VERSION"
 
-	# shellcheck disable=SC2086  # $deps is empty or a single flag
+	# shellcheck disable=SC2086  # $deps is a list of flags
 	sh "$tmp/root/bin/adf-router" __install "$tmp/root" $deps || exit 1
 	rm -rf "$tmp"
 	trap - EXIT INT TERM

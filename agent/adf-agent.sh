@@ -185,7 +185,7 @@ start_engine() {
 	esac
 	pid=$(cat "$ADF_STATE/engine.pid")
 	i=0
-	while [ $i -lt 40 ]; do
+	while [ $i -lt $((ENGINE_START_S * 10)) ]; do
 		if ! kill -0 "$pid" 2>/dev/null; then
 			printf '{"t":"engine","ok":false,"error":%s}\n' "$(json_str "engine exited: $(head -n1 "$ADF_STATE/engine.err" 2>/dev/null)")"
 			rm -f "$ADF_STATE/engine.pid"
@@ -195,7 +195,7 @@ start_engine() {
 		msleep 100
 		i=$((i + 1))
 	done
-	printf '{"t":"engine","ok":false,"error":"engine did not open its port within 4s"}\n'
+	printf '{"t":"engine","ok":false,"error":"engine did not open its port within %ss"}\n' "$ENGINE_START_S"
 	kill_engine
 	return 1
 }
@@ -247,6 +247,7 @@ cmd_run() {
 	trap 'cleanup; exit 130' INT TERM
 	ENGINE_KIND=none; PORT=11290; REPS=1; INTERVAL_MS=250; TIMEOUT=8; CONNECT_TIMEOUT=4; BYEDPI_ARGS=""; CACERT=""
 	STOP_ON_FAIL=0
+	ENGINE_START_S=10
 	targets="$ADF_STATE/targets"
 	: > "$targets"
 	section=""
@@ -268,6 +269,7 @@ cmd_run() {
 			connect_timeout) CONNECT_TIMEOUT=$2 ;;
 			cacert) CACERT=$2 ;;
 			stop_on_fail) STOP_ON_FAIL=$2 ;;
+			engine_start_s) ENGINE_START_S=$2 ;;
 			byedpi_args) shift; BYEDPI_ARGS="$*" ;;
 			config-begin) : > "$ADF_STATE/cfg.json"; section=config ;;
 			target) shift; printf '%s\n' "$*" >> "$targets" ;;
