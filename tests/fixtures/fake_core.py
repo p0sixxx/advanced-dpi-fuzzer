@@ -4,7 +4,7 @@
 Implements ``version``, ``check -c <cfg>`` and ``run -c <cfg>`` with a working
 SOCKS5 "mixed" inbound. A scripted DPI drops connections whose first client
 payload carries a hostname listed in FAKE_CORE_BLOCK, or is exactly
-FAKE_CORE_DROP_SPLIT_HELLO bytes long, unless the configured desync mode is
+FAKE_CORE_DROP_WHOLE_HELLO bytes long, unless the configured desync mode is
 listed in FAKE_CORE_WORKS. FAKE_CORE_REJECT lists outbound keys the "binary"
 refuses in ``check`` (capability probing tests).
 """
@@ -76,8 +76,8 @@ class Handler(socketserver.BaseRequestHandler):
             works = set(os.environ.get("FAKE_CORE_WORKS", "").split(","))
             ob = self.outbound
             bypass = ob.get("type") == "desync" and ob.get("mode") in works
-            split_at = int(os.environ.get("FAKE_CORE_DROP_SPLIT_HELLO", 0))
-            if (any(b in first for b in blocked) or (split_at and len(first) == split_at)) and not bypass:
+            whole = int(os.environ.get("FAKE_CORE_DROP_WHOLE_HELLO", 0))
+            if (any(b in first for b in blocked) or (whole and len(first) == whole)) and not bypass:
                 c.close()  # DPI reset
                 up.close()
                 return

@@ -61,8 +61,8 @@ class Router:
                               stdin=subprocess.DEVNULL)
 
     def wait_finished(self, timeout: float = 45) -> str:
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             out = self.cmd("adf-router", "status").stdout
             if out.startswith("not running"):
                 return out

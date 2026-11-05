@@ -16,8 +16,8 @@ from adf.config import load_config
 from adf.db import Store
 from adf.engines import TachyonDesync
 from adf.probe.backend import AgentBackend, BackendError, LocalTransport, ProbeSettings, SimulatedBackend, SSHTransport
-from adf.probe.hello import (FIRST_SEGMENT_BYTES, HELLO_BYTES, MLKEM768_Q, ProxyFailure, X25519_MLKEM768,
-                             client_hello, exchange, mlkem768_public_key, socks5_open)
+from adf.probe.hello import (HELLO_BYTES, MLKEM768_Q, ProxyFailure, X25519_MLKEM768, client_hello, exchange,
+                             mlkem768_public_key, socks5_open)
 from adf.probe.model import LARGE_HELLO, BatchResult, Target
 from adf.probe.targets import DEFAULT_TARGETS, with_large_hello
 from adf.report import compare_report
@@ -28,6 +28,7 @@ from adf.strategy import from_text
 
 FIXTURES = Path(__file__).parent / "fixtures"
 SERVER_HELLO = b"\x16\x03\x03\x00\x04\x02\x00\x00\x00"
+MSS = 1460
 
 
 def extensions(hello):
@@ -53,7 +54,7 @@ def extensions(hello):
 
 def test_hello_is_browser_sized_and_spans_two_segments():
     hello = client_hello("www.youtube.com", random.Random(1))
-    assert len(hello) == HELLO_BYTES > FIRST_SEGMENT_BYTES
+    assert len(hello) == HELLO_BYTES > MSS
     ext = dict(extensions(hello))
     assert b"www.youtube.com" in ext[0]
     assert 0x0304 in struct.unpack(">3H", ext[0x2b][1:])
@@ -62,6 +63,12 @@ def test_hello_is_browser_sized_and_spans_two_segments():
 def test_hello_size_is_exact_for_any_shuffle():
     for seed in range(40):
         assert len(client_hello("a.example", random.Random(seed))) == HELLO_BYTES
+
+
+def test_no_extension_is_repeated():
+    for seed in range(300):
+        kinds = [kind for kind, _ in extensions(client_hello("a.example", random.Random(seed)))]
+        assert len(kinds) == len(set(kinds))
 
 
 def test_hello_refuses_a_size_it_cannot_reach():
@@ -73,7 +80,7 @@ def test_extension_order_moves_the_sni_between_segments():
     places = set()
     for seed in range(40):
         hello = client_hello("www.youtube.com", random.Random(seed))
-        places.add(hello.index(b"www.youtube.com") < FIRST_SEGMENT_BYTES)
+        places.add(hello.index(b"www.youtube.com") < MSS)
     assert places == {True, False}
 
 
@@ -125,8 +132,8 @@ class Scripted:
 ])
 def test_exchange_verdicts(replies, error, verdict):
     s = Scripted(replies, error)
-    assert exchange(s, b"x" * HELLO_BYTES, 1, gap_s=0)[0] == verdict
-    assert [len(p) for p in s.sent] == [FIRST_SEGMENT_BYTES, HELLO_BYTES - FIRST_SEGMENT_BYTES]
+    assert exchange(s, b"x" * HELLO_BYTES, 1)[0] == verdict
+    assert [len(p) for p in s.sent] == [HELLO_BYTES]    # in two writes the engine hides the failure
 
 
 def test_socks_failures_are_proxy_failures():
@@ -151,6 +158,7 @@ def test_large_variants_cover_required_https_targets():
     large = {t.id: t for t in targets if t.kind == LARGE_HELLO}
     assert {"youtube-www-large", "youtube-video-large", "discord-www-large"} <= set(large)
     assert "youtube-img-large" not in large
+    assert {"youtube-api-large", "discord-cdn-large", "instagram-api-large"} <= set(large)
     assert large["youtube-www-large"].required and large["youtube-www-large"].min_bytes == 0
     for t in targets:
         t.validate()
@@ -208,7 +216,7 @@ def agent(tmp_path):
     core.write_text(f"#!/bin/sh\nexec {sys.executable} {FIXTURES / 'fake_core.py'} \"$@\"\n")
     core.chmod(0o755)
     env = {"ADF_CORE": str(core), "ADF_STATE": str(tmp_path / "state"), "ADF_MIN_MEM_KB": "1",
-           "FAKE_CORE_DROP_SPLIT_HELLO": str(FIRST_SEGMENT_BYTES), "FAKE_CORE_WORKS": "multi_disorder"}
+           "FAKE_CORE_DROP_WHOLE_HELLO": str(HELLO_BYTES), "FAKE_CORE_WORKS": "multi_disorder"}
     port = 21000 + (os.getpid() + hash(str(tmp_path))) % 19000
     settings = ProbeSettings(port=port, interval_ms=0, routing_mark=None, timeout_s=3, connect_timeout_s=2)
     return AgentBackend(LocalTransport(env=env), settings), env
@@ -219,7 +227,7 @@ def _running(env):
     return pid_file.exists()
 
 
-def test_two_part_hello_separates_strategies(agent, tls_server):
+def test_whole_hello_separates_strategies(agent, tls_server):
     be, env = agent
     port, seen = tls_server
     t = Target("blk-large", f"https://blocked.test:{port}/", "test", kind=LARGE_HELLO)
@@ -230,7 +238,7 @@ def test_two_part_hello_separates_strategies(agent, tls_server):
     assert [r.verdict for r in good.results] == ["ok", "ok"]
     assert good.results[0].tls_ms > 0 and good.results[0].ttfb_ms == good.results[0].tls_ms
     assert [r.verdict for r in bad.results] == ["tls_reset", "tls_reset"]
-    assert [n for n in seen if n] == [HELLO_BYTES, HELLO_BYTES]     # both parts reached the server
+    assert [n for n in seen if n] == [HELLO_BYTES, HELLO_BYTES]     # only the working strategy reached the server
     assert not _running(env)                        # the engine is stopped after the batch
 
 
@@ -270,8 +278,8 @@ def test_hold_stops_by_itself_when_the_controller_disappears(agent):
     be.transport.call(["hold", "1"], stdin=job, timeout=20)
     pid = int((Path(env["ADF_STATE"]) / "engine.pid").read_text())
     os.kill(pid, 0)
-    deadline = time.time() + 8
-    while time.time() < deadline and _running(env):
+    deadline = time.monotonic() + 8
+    while time.monotonic() < deadline and _running(env):
         time.sleep(0.1)
     assert not _running(env)
     with pytest.raises(ProcessLookupError):

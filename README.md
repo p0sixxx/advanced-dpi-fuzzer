@@ -147,19 +147,43 @@ ssh -t root@192.168.8.1 sh /tmp/adf-router.sh
 
 ## Цели и оценка
 
-Цели — `src/adf/probe/targets.py` или свой TOML (`examples/targets.toml`): Google, YouTube,
-YouTube Music, googlevideo, Discord, Telegram, GitHub, Cloudflare (+ контрольные `ya.ru`, `vk.com`).
+Цели — `src/adf/probe/targets.py` или свой TOML (`examples/targets.toml`), контрольные — `ya.ru` и
+`vk.com`. Хосты выбраны по спискам доменов, которые Tachyon использует для маршрутизации, и проверены
+запросами. Обязательные цели определяют оценку, остальные видны в отчёте по целям:
+
+| Сервис | Обязательные | Дополнительные |
+|---|---|---|
+| YouTube | `www.youtube.com`, `redirector.googlevideo.com`, `youtubei.googleapis.com` (приложения Android и iOS) | `i.ytimg.com`, `jnn-pa.googleapis.com`, `yt3.ggpht.com` |
+| YouTube Music | `music.youtube.com` | |
+| Discord | `discord.com`, `gateway.discord.gg`, `cdn.discordapp.com` | `media.discordapp.net`, `updates.discord.com` |
+| Instagram | `www.instagram.com`, `i.instagram.com` (приложения) | `static.cdninstagram.com`, `scontent.cdninstagram.com`, `edge-chat.instagram.com` |
+| Telegram | `web.telegram.org` | `api.telegram.org`, `t.me` |
+| Google | `www.google.com` | `accounts.google.com`, `play.googleapis.com`, `fcm.googleapis.com` |
+| GitHub | `github.com` | `api.github.com`, `raw.githubusercontent.com` |
+| Cloudflare | `speed.cloudflare.com` | `www.cloudflare.com` |
+
 Для каждой цели проверяются HTTP-статус, сертификат, **объём ответа** (обрыв ТСПУ на 16–20 КБ
 виден только на больших ответах), содержимое (regex), до `max_ips` адресов CDN и IPv4/IPv6.
 
-**Большое приветствие.** `curl` на роутере отправляет маленький ClientHello одним сегментом, а Chrome
-отправляет около 2 КБ двумя сегментами, с постквантовым ключом и случайным порядком расширений, поэтому
-SNI может оказаться в любом из них. Стратегия может пройти все пробы `curl` и зависать в каждом Chrome:
-`fake_disorder split_pos=host+1` дал 150/150 с `curl` и 0/10 с большим приветствием. Поэтому для каждой
-обязательной HTTPS-цели добавляется цель `<id>-large`: контроллер собирает такое приветствие сам
-(`src/adf/probe/hello.py`) и отправляет его двумя частями через временный движок, а успехом считается
-`ServerHello` от сервера. С ПК соединение идёт через `ssh -W`, на роутере напрямую. Отключить можно через
-`[probe] large_hello = false`.
+**Большое приветствие.** `curl` на роутере отправляет маленький ClientHello, а Chrome отправляет
+1,9–2 КБ с постквантовым ключом и случайным порядком расширений. Стратегия может пройти все пробы `curl`
+и зависать в Chrome: `fake_disorder split_pos=host+1` дал 150/150 с `curl` и 0/16 с настоящими
+приветствиями Chrome. Поэтому для каждой обязательной HTTPS-цели добавляется цель `<id>-large`: контроллер
+собирает такое приветствие сам (`src/adf/probe/hello.py`) и отправляет его одной записью через временный
+движок, а успехом считается `ServerHello` от сервера. С ПК соединение идёт через `ssh -W`, на роутере
+напрямую. Отключить можно через `[probe] large_hello = false`.
+
+Пример, YouTube на Flint 2, ядро 0.3.4, по 10 кругов, успешные попытки:
+
+| Стратегия | `curl`, обязательные цели | большое приветствие |
+|---|---:|---:|
+| `multi_disorder split_pos=1,sniext+1,midsld` | 40/40 | 31/40 |
+| `fake_disorder split_pos=1` | 39/40 | 30/40 |
+| `fake_disorder split_pos=host+1` | 40/40 | 8/40 |
+| Adaptive 2.0 | 30/40 | 16/40 |
+
+По `curl` первые три строки почти неотличимы, а по большому приветствию видно, почему `host+1` зависал в
+Chrome. Adaptive 2.0 здесь не проходит `youtubei.googleapis.com`, поэтому он сломал бы мобильные приложения.
 
 Классы: **Not Working / Unstable / Partially Working / Working / Stable / Excellent** — по нижней
 границе интервала Уилсона худшей цели (`Working`: LB ≥ 0.50, n ≥ 5; `Stable`: LB ≥ 0.75, n ≥ 12;
@@ -173,10 +197,13 @@ SNI может оказаться в любом из них. Стратегия 
   `adf caps` выводит такие ключи в `unverifiable_by_check`.
 * `adf compare` перезапускает движок каждый раунд, поэтому Adaptive 2.0 измеряется с холодного старта.
 * Цель `youtube-video` проверяет прохождение TLS к googlevideo, а не скорость видеопотока.
-* Проба большого приветствия покрыта тестами с поддельным ядром и сервером, но ещё не сравнивалась с
-  настоящим Chrome и не запускалась через ADF на реальном роутере. Для неё нужен разрешённый проброс TCP
-  в SSH-сервере роутера: если его нет, поиск остановится с понятной ошибкой. Выводы о ней опираются на
-  отдельные замеры через LAN (`docs/research/tachyon-fuzzer-audit.md`, раздел 2.11).
+* Проба большого приветствия откалибрована по настоящим приветствиям Chrome, снятым локально
+  (`docs/research/tachyon-fuzzer-audit.md`, раздел 2.11), но это проба, а не браузер: она проверяет только
+  ответ сервера на приветствие. Для неё нужен разрешённый проброс TCP в SSH-сервере роутера: на dropbear
+  Flint 2 он работает, а если его нет, поиск остановится с понятной ошибкой.
+* Приложения Android и iOS представлены своим API (`youtubei.googleapis.com`, `i.instagram.com`), но их
+  собственные TLS-приветствия не воспроизводятся. Протокол MTProto в Telegram проверить нельзя: цели
+  Telegram показывают только веб-хосты.
 * Результат относится к конкретной версии ядра. Смена `tachyon-core` начинает новую эпоху, но уже
   применённую стратегию заново не измеряет: после обновления запускайте `adf compare`.
 * `adf run` и `adf compare` без терминала (скрипты, агенты) требуют `--yes`.

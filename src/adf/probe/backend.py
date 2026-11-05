@@ -561,7 +561,7 @@ class DPIModel:
         if p.get("syndata") and target.category == "cloudflare":
             base *= 0.3
         if target.kind == LARGE_HELLO and mode != "tlsrec" and "," not in pos and not pos.isdigit():
-            base *= 0.05    # one split at the SNI: it may be in the second segment
+            base *= 0.05    # one split at the SNI: fails on a large hello (measured with Chrome hellos)
         return max(0.0, min(1.0, base))
 
 

@@ -17,6 +17,12 @@ category = "youtube"
 ok_codes = [200, 204, 301, 302, 400, 403, 404, 405]
 
 [[target]]
+id = "youtube-api"
+url = "https://youtubei.googleapis.com/"
+category = "youtube"
+max_ips = 1
+
+[[target]]
 id = "ytmusic-www"
 url = "https://music.youtube.com/"
 category = "youtube_music"
@@ -28,6 +34,12 @@ url = "https://discord.com/"
 category = "discord"
 min_bytes = 32768
 body_regex = "discord"
+
+[[target]]
+id = "discord-cdn"
+url = "https://cdn.discordapp.com/"
+category = "discord"
+max_ips = 1
 
 [[target]]
 id = "telegram-web"

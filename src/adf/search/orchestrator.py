@@ -588,7 +588,7 @@ class Orchestrator:
     # ================================================================== run
     def run(self) -> Dict[str, Any]:
         self.guard.start()
-        started = time.time()
+        started = time.monotonic()
         status = "finished"
         error = ""
         optimized: Optional[Tuple[Candidate, List[str]]] = None
@@ -624,7 +624,7 @@ class Orchestrator:
         except SearchAborted as e:
             status = "aborted"
             error = str(e)
-        summary = self.summary(env, optimized, status, error, time.time() - started)
+        summary = self.summary(env, optimized, status, error, time.monotonic() - started)
         if self.run_id:
             self.store.finish_run(self.run_id, status, summary)
         return summary

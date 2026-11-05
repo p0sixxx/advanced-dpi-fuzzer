@@ -1,13 +1,11 @@
-"""A ClientHello of the size current Chrome sends, delivered in two TCP segments.
+"""A ClientHello of the size current Chrome sends.
 
-curl on a router sends a few hundred bytes in one segment. Chrome offers a post-quantum key and
-sends about 2 KB, so the hello spans two segments and its extensions are shuffled: the SNI can end
-up in either of them. A strategy can pass every curl probe and still hang in every Chrome (measured
-on a Flint 2: ``split_pos=host+1`` passed 150/150 with curl and 0/10 with a large hello), so such a
-hello is probed separately.
+curl on a router sends a few hundred bytes. Chrome offers a post-quantum key and sends about 2 KB
+with its extensions shuffled. A strategy can pass every curl probe and still hang in Chrome: on a
+Flint 2 ``split_pos=host+1`` passed 150/150 with curl and 0/16 with captured Chrome hellos.
 
-The two parts are written with a pause, because that is what the engine sees from a LAN client: a
-hello written at once over loopback reaches it whole and overstates the strategy.
+The hello is written at once, because the engine has to get it whole, as it does from a LAN client.
+Writing it in two parts with a pause hid that failure: the same hellos then passed 13/16.
 
 No TLS library is involved: the handshake is not finished, and the verdict is whether the server's
 first record gets back. The ML-KEM key is well-formed, so servers accept it and pick that group.
@@ -21,9 +19,7 @@ import struct
 import time
 from typing import Optional, Protocol, Tuple
 
-HELLO_BYTES = 1950              # record included; Chrome's hello on a real client was about 2 KB
-FIRST_SEGMENT_BYTES = 1460      # MSS on Ethernet
-SEGMENT_GAP_S = 0.01
+HELLO_BYTES = 1950              # record included; captured Chrome hellos were 1923-2019 bytes
 PROXY_TIMEOUT_S = 15.0          # covers opening the SSH channel
 
 X25519 = 0x001d
@@ -83,7 +79,7 @@ def client_hello(host: str, rng: Optional[random.Random] = None, size: int = HEL
                   _u16(X25519_MLKEM768) + _vec16(mlkem768_public_key(rng) + rng.randbytes(32)) +
                   _u16(X25519) + _vec16(rng.randbytes(32)))
     ech_grease = (b"\x00" + _u16(1) + _u16(1) + bytes([rng.randrange(256)]) + _vec16(rng.randbytes(32)) +
-                  _vec16(rng.randbytes(rng.choice((144, 176, 208)))))
+                  _vec16(rng.randbytes(rng.choice((144, 176, 208, 240)))))
     alpn = _vec16(_vec8(b"h2") + _vec8(b"http/1.1"))
     signature_algorithms = (0x0403, 0x0804, 0x0401, 0x0503, 0x0805, 0x0501, 0x0806, 0x0601)
     extensions = [
@@ -114,11 +110,15 @@ def client_hello(host: str, rng: Optional[random.Random] = None, size: int = HEL
         body = before_extensions + _vec16(exts)
         return b"\x16\x03\x01" + _vec16(b"\x01" + len(body).to_bytes(3, "big") + body)
 
-    exts = _ext(_grease(rng), b"") + b"".join(extensions)
+    opening = _grease(rng)
+    closing = _grease(rng)
+    while closing == opening:       # a repeated extension is a fatal error for the server
+        closing = _grease(rng)
+    exts = _ext(opening, b"") + b"".join(extensions)
     filler = size - len(record(exts)) - 4 - 5       # padding extension header, closing GREASE extension
     if filler < 0:
         raise ValueError(f"hello cannot be smaller than {size - filler} bytes")
-    return record(exts + _ext(0x0015, bytes(filler)) + _ext(_grease(rng), b"\x00"))
+    return record(exts + _ext(0x0015, bytes(filler)) + _ext(closing, b"\x00"))
 
 
 def _read_exact(stream: Stream, n: int, timeout: float) -> bytes:
@@ -155,14 +155,11 @@ def socks5_open(stream: Stream, host: str, port: int, timeout: float = PROXY_TIM
         raise ProxyFailure(f"the proxy is unavailable: {e}") from e
 
 
-def exchange(stream: Stream, hello: bytes, timeout: float, first: int = FIRST_SEGMENT_BYTES,
-             gap_s: float = SEGMENT_GAP_S) -> Tuple[str, float, str]:
-    """Send the hello in two parts; returns (verdict, milliseconds to the first record, error)."""
+def exchange(stream: Stream, hello: bytes, timeout: float) -> Tuple[str, float, str]:
+    """Send the hello; returns (verdict, milliseconds to the first record, error)."""
     started = time.monotonic()
     try:
-        stream.send(hello[:first])
-        time.sleep(gap_s)
-        stream.send(hello[first:])
+        stream.send(hello)
         reply = _read_exact(stream, 6, timeout)
     except TimeoutError:
         return "tls_timeout", timeout * 1000, "no ServerHello"
