@@ -9,13 +9,15 @@ from . import check as job
 from . import console, live
 from .config import AppConfig
 from .console import Terminal, bar, clock, table
+from .integrations import tachyon as tachyon_int
+from .probe.backend import BackendError
 
 PHASES = {
     "connect": "подключение к роутеру", "baseline": "проверка без обхода", "search": "поиск стратегий",
     "simplify": "упрощение лучшей стратегии", "final": "финальный замер кандидатов",
     "measure": "замер настройки", "dns": "сверка адресов DNS", "done": "готово",
 }
-MODES = {job.QUICK: "быстрая проверка", job.FULL: "полный подбор"}
+MODES = {job.CURRENT: "проверка текущей стратегии", job.QUICK: "быстрая проверка", job.FULL: "долгая проверка"}
 VERDICTS = {"ok": "ok", "tls_timeout": "нет ответа", "tls_reset": "сброс", "server_rejected": "отказ сервера",
             "connect_failed": "нет соединения", "content_mismatch": "чужой ответ", "proxy_error": "ошибка прокси"}
 STATUS = {
@@ -253,7 +255,7 @@ def watch(cli: Any, config: Optional[str]) -> int:
 def _namespace(config: Optional[str]) -> Any:
     import argparse
 
-    return argparse.Namespace(config=config)
+    return argparse.Namespace(config=config, local=False, uci_file=None)
 
 
 def _interactive() -> bool:
@@ -290,19 +292,69 @@ def start_check(spec: job.Spec, cli: Any, attach: bool = True) -> int:
     return watch(cli, spec.config)
 
 
+def _pick(names: Sequence[str], titles: Sequence[str], default: Sequence[int] = ()) -> List[str]:
+    """One or several numbers, or the last number for all at once. Nothing picked means going back."""
+    for i, title in enumerate(titles, 1):
+        print(f"{i}  {title}")
+    every = len(titles) + 1
+    print(f"{every}  Все сразу, по очереди")
+    print("0  Назад")
+    hint = f" [{','.join(str(i + 1) for i in default)}]" if default else ""
+    answer = ask(f"Номера через запятую{hint}: ")
+    if answer == "0":
+        return []
+    if not answer:
+        return [names[i] for i in default]
+    numbers = [int(part) for part in answer.replace(" ", "").split(",") if part.isdigit()]
+    if every in numbers:
+        return list(names)
+    return list(dict.fromkeys(names[n - 1] for n in numbers if 1 <= n <= len(names)))
+
+
 def choose_services(default: Sequence[str]) -> List[str]:
     names = list(job.SERVICES)
     print("\nКакие сервисы проверить?")
-    for i, name in enumerate(names, 1):
-        print(f"{i}  {job.SERVICES[name]}")
-    answer = ask(f"Номера через запятую [{','.join(str(names.index(s) + 1) for s in default)}]: ")
-    if not answer:
-        return list(default)
-    picked = []
-    for part in answer.replace(" ", "").split(","):
-        if part.isdigit() and 1 <= int(part) <= len(names):
-            picked.append(names[int(part) - 1])
-    return list(dict.fromkeys(picked)) or list(default)
+    return _pick(names, [job.SERVICES[n] for n in names], [names.index(s) for s in default if s in names])
+
+
+def choose_sections(parsed: Mapping[str, Mapping[str, Any]], default: Sequence[str]) -> Dict[str, str]:
+    """Service -> section. A section whose lists name no known service is matched by asking."""
+    sections = job.working_sections(parsed)
+    if not sections:
+        print("\nНа этом роутере нет работающих секций desync, проверять нечего.")
+        return {}
+    print("\nКакую секцию проверить? Названия взяты с этого роутера.")
+    titles = []
+    for sid in sections:
+        services = [job.SERVICES[s] for s in job.services_of(parsed, sid)]
+        titles.append(f"{sid}: {', '.join(services)}" if services else f"{sid}: сервис не определён")
+    picked: Dict[str, str] = {}
+    for sid in _pick(sections, titles):
+        services = job.services_of(parsed, sid)
+        if not services:
+            print(f"\nЧем проверять секцию {sid}?")
+            names = list(job.SERVICES)
+            services = _pick(names, [job.SERVICES[n] for n in names], [names.index(s) for s in default if s in names])
+        for service in services:
+            picked.setdefault(service, sid)
+    return picked
+
+
+def _duration(minutes: float) -> str:
+    hours, rest = divmod(int(round(minutes)), 60)
+    if hours and rest:
+        return f"{hours} ч {rest} мин"
+    return f"{hours} ч" if hours else f"{rest} мин"
+
+
+def _launch(spec: job.Spec, cli: Any) -> None:
+    """The time is said before the start: all services one after another take hours."""
+    count = len(spec.services)
+    print(f"\nСервисов: {count}, по очереди: на роутере работает один временный движок. "
+          f"Примерно {_duration(job.planned_minutes(spec))}.")
+    if ask("Enter: начать, 0: отмена ") == "0":
+        return
+    start_check(spec, cli)
 
 
 def _header(cfg: AppConfig, term: Terminal) -> List[str]:
@@ -325,22 +377,33 @@ def menu(cli: Any, config: Optional[str], cfg: AppConfig) -> int:
         running = live.active(live.read(job.state_path()))
         if running:
             print(term.style("Идёт проверка.", "cyan"))
-        print("1  Быстрая проверка: работает ли текущая настройка, несколько минут")
-        print("2  Полный подбор: поиск стратегии лучше текущей")
-        print("3  Смотреть проверку или последний результат")
+        print(f"1  Быстрая проверка: подбор, 15-{job.QUICK_MINUTES} минут на сервис")
+        print(f"2  Долгая проверка: подбор, около {job.FULL_MINUTES} минут на сервис")
+        print("3  Проверка текущей стратегии")
         print("4  Откатить стратегию")
         print("5  Подключение к роутеру")
+        print("6  Смотреть проверку или последний результат")
         print("0  Выход")
         answer = ask("> ")
-        if answer == "1":
-            services = choose_services(services)
-            start_check(job.Spec(job.QUICK, services, config=config), cli)
-        elif answer == "2":
-            services = choose_services(services)
-            typed = ask(f"Минут на всё [{job.FULL_MINUTES}]: ")
-            minutes = float(typed) if typed.replace(".", "", 1).isdigit() and float(typed) > 0 else job.FULL_MINUTES
-            start_check(job.Spec(job.FULL, services, minutes, config=config), cli)
+        if answer in ("1", "2"):
+            mode, minutes = (job.QUICK, job.QUICK_MINUTES) if answer == "1" else (job.FULL, job.FULL_MINUTES)
+            chosen = choose_services(services)
+            if chosen:
+                services = chosen
+                typed = ask(f"Минут на сервис [{minutes}]: ")
+                if typed.replace(".", "", 1).isdigit() and float(typed) > 0:
+                    minutes = float(typed)
+                _launch(job.Spec(mode, chosen, minutes, config=config), cli)
         elif answer == "3":
+            try:
+                parsed = tachyon_int.parse_uci_show(cli._uci_text(cfg, _namespace(config)))
+            except BackendError as e:
+                print(term.style(f"Роутер не ответил: {e}", "red"))
+                continue
+            sections = choose_sections(parsed, services)
+            if sections:
+                _launch(job.Spec(job.CURRENT, list(sections), config=config, sections=sections), cli)
+        elif answer == "6":
             watch(cli, config)
         elif answer == "4":
             section = ask("Секция, например YouTube_desync: ")

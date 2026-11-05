@@ -1,4 +1,4 @@
-"""The check started from a PC: quick (does the current setup work) or full (search for a better one).
+"""The check started from a PC: of the current setup, or a short or long search for a better one.
 
 Each service has its own Tachyon section, so each gets its own measurement and its own strategy; a single
 search over several services would look for a strategy that fits all of them.
@@ -30,14 +30,19 @@ from .search.dnscheck import run_check
 from .search.orchestrator import Orchestrator, SearchConfig
 from .strategy import Strategy, make_strategy
 
+CURRENT = "current"
 QUICK = "quick"
 FULL = "full"
 SERVICES = {"youtube": "YouTube", "discord": "Discord", "instagram": "Instagram", "telegram": "Telegram",
             "google": "Google", "github": "GitHub"}
 COMMUNITY_LISTS = {"instagram": "meta"}     # Tachyon's list name when it differs from the service
-QUICK_ROUNDS = 5
-FINAL_ROUNDS = 10
+CURRENT_ROUNDS = 5
+QUICK_MINUTES = 20
 FULL_MINUTES = 60
+FINAL_ROUNDS = {QUICK: 5, FULL: 10}
+ROUND_S = 60                # the current and the found strategy measured side by side, one round
+DNS_CHECK_S = 60
+MIN_SEARCH_S = 120
 WORKS = 0.9
 FAILS = 0.8
 BETTER_BY = 0.05
@@ -52,9 +57,10 @@ CREATE_NEW_PROCESS_GROUP = 0x00000200
 class Spec:
     mode: str
     services: List[str]
-    minutes: float = FULL_MINUTES
+    minutes: float = FULL_MINUTES       # for each service
     simulate: bool = False
     config: Optional[str] = None
+    sections: Dict[str, str] = dataclasses.field(default_factory=dict)      # service -> section chosen by name
 
 
 def label(t: Target) -> str:
@@ -65,18 +71,36 @@ def _names(value: Any) -> List[str]:
     return value.split() if isinstance(value, str) else list(value or ())
 
 
+def working_sections(parsed: Mapping[str, Mapping[str, Any]]) -> List[str]:
+    """Desync sections under the names they have on this router, without those the core does not run."""
+    inactive = tachyon_int.inactive_desync_sources(parsed)
+    return [sid for sid in tachyon_int.desync_sections(parsed)
+            if sid not in inactive and str(parsed[sid].get("enabled", "1")) != "0"]
+
+
+def services_of(parsed: Mapping[str, Mapping[str, Any]], section: str) -> List[str]:
+    opts = parsed[section]
+    lists = _names(opts.get("community_lists"))
+    for ref in _names(opts.get("condition_refs")):
+        lists += _names(parsed.get(ref, {}).get("community_lists"))
+    return [service for service in SERVICES if COMMUNITY_LISTS.get(service, service) in lists]
+
+
 def find_section(parsed: Mapping[str, Mapping[str, Any]], service: str) -> Optional[str]:
     """The section that serves a service: by its own lists or those of its conditions."""
-    wanted = COMMUNITY_LISTS.get(service, service)
-    inactive = tachyon_int.inactive_desync_sources(parsed)
-    for sid in tachyon_int.desync_sections(parsed):
-        opts = parsed[sid]
-        lists = _names(opts.get("community_lists"))
-        for ref in _names(opts.get("condition_refs")):
-            lists += _names(parsed.get(ref, {}).get("community_lists"))
-        if wanted in lists and sid not in inactive and str(opts.get("enabled", "1")) != "0":
+    for sid in working_sections(parsed):
+        if service in services_of(parsed, sid):
             return sid
     return None
+
+
+def search_seconds(mode: str, minutes: float) -> float:
+    """The budget of a service covers the side-by-side measurement and the DNS check after the search."""
+    return max(MIN_SEARCH_S, 60 * minutes - FINAL_ROUNDS[mode] * ROUND_S - DNS_CHECK_S)
+
+
+def planned_minutes(spec: Spec) -> float:
+    return (spec.minutes if spec.mode != CURRENT else 4) * len(spec.services)
 
 
 def judge(rows: Mapping[str, Mapping[str, Any]], dns_check: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -148,9 +172,11 @@ class Job:
         return self.cfg.stop_file.exists()
 
     def _current(self, service: str, parsed: Mapping[str, Mapping[str, Any]], engine: TachyonDesync):
-        section = find_section(parsed, service)
+        section = self.spec.sections.get(service) or find_section(parsed, service)
         if section is None:
             return None, Variant("без обхода", outbound=dict(DIRECT)), None
+        if section not in parsed:
+            raise ValueError(f"section {section} not found on the router")
         imported = tachyon_int.section_to_params(section, parsed[section], engine)
         return section, Variant(f"сейчас: {section}", outbound=imported.outbound), imported.params
 
@@ -180,7 +206,7 @@ class Job:
                                   "current": opts.get("desync_opts") or current.text, "candidate": None,
                                   "dns": backend.dns_info()}
         reports: List[str] = []
-        full = self.spec.mode == FULL
+        full = self.spec.mode != CURRENT
         found = None
         if full:
             found = self._search(engine, targets, controls, store, backend, params, reports, result)
@@ -189,7 +215,8 @@ class Job:
         variants = [current]
         if found is not None:
             variants.append(Variant("найдена", strategy=store.get_strategy(found["id"])))
-        meta = self._measure(store, backend, variants, targets, controls, ips, FINAL_ROUNDS if full else QUICK_ROUNDS,
+        meta = self._measure(store, backend, variants, targets, controls, ips,
+                             FINAL_ROUNDS[self.spec.mode] if full else CURRENT_ROUNDS,
                              (0.85, 0.95) if full else (0.0, 0.8))
         reports.append(compare_report(meta["rows"], meta))
         now = meta["rows"][0]
@@ -226,7 +253,6 @@ class Job:
     def _search(self, engine: Any, targets: Sequence[Target], controls: Sequence[Target], store: Store, backend: Any,
                 params: Optional[Mapping[str, Any]], reports: List[str],
                 result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        seconds = 60 * self.spec.minutes / len(self.spec.services) * 0.8
         extra: List[Strategy] = []
         if params:
             try:
@@ -237,7 +263,7 @@ class Job:
                           use_history=False, force_without_blocked=True)
         caps = None if self.spec.simulate else self.cli._caps_for(store, backend, engine.name,
                                                                    self.cfg.router.host or "local")
-        guard = self._guard(seconds)
+        guard = self._guard(search_seconds(self.spec.mode, self.spec.minutes))
         guard.budget.max_batches = self.cfg.search.max_batches
         guard.budget.max_probes = self.cfg.search.max_probes
         labels = {t.id: label(t) for t in targets}
@@ -313,6 +339,8 @@ def spawn(spec: Spec) -> int:
         command += ["-c", spec.config]
     command += ["check", "--job", "--mode", spec.mode, "--services", ",".join(spec.services),
                 "--minutes", str(spec.minutes)]
+    if spec.sections:
+        command += ["--sections", ",".join(f"{service}={section}" for service, section in spec.sections.items())]
     if spec.simulate:
         command.append("--simulate")
     env = dict(os.environ, PYTHONPATH=str(Path(__file__).resolve().parents[1]), PYTHONIOENCODING="utf-8")

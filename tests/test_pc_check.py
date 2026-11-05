@@ -216,7 +216,7 @@ def run_job(tmp_path, mode, services=("youtube",), stop=False):
 
 
 def test_quick_check_reports_every_target(tmp_path):
-    code, snapshot = run_job(tmp_path, check.QUICK)
+    code, snapshot = run_job(tmp_path, check.CURRENT)
     assert code == 0 and snapshot["status"] == live.FINISHED and snapshot["fraction"] == 1.0
     result = snapshot["results"][0]
     assert result["status"] in ("ok", "no_bypass") and result["section"] is None
@@ -225,7 +225,7 @@ def test_quick_check_reports_every_target(tmp_path):
 
 
 def test_each_service_gets_its_own_result(tmp_path):
-    _, snapshot = run_job(tmp_path, check.QUICK, ("youtube", "discord"))
+    _, snapshot = run_job(tmp_path, check.CURRENT, ("youtube", "discord"))
     assert [r["service"] for r in snapshot["results"]] == ["youtube", "discord"]
 
 
@@ -239,7 +239,7 @@ def test_full_check_measures_the_candidate_next_to_the_current(tmp_path):
 
 
 def test_stop_ends_the_check_and_keeps_the_report(tmp_path):
-    code, snapshot = run_job(tmp_path, check.QUICK, ("youtube", "discord"), stop=True)
+    code, snapshot = run_job(tmp_path, check.CURRENT, ("youtube", "discord"), stop=True)
     assert code == 0 and snapshot["status"] == live.STOPPED
     assert len(snapshot["results"]) == 1 and Path(snapshot["report"]).exists()
 
@@ -248,7 +248,7 @@ def test_router_failure_ends_with_a_readable_error(tmp_path, monkeypatch):
     def broken(cfg, args):
         raise cli.BackendError("ssh: connect to host port 22: Connection refused")
     monkeypatch.setattr(cli, "_backend", broken)
-    code, snapshot = run_job(tmp_path, check.QUICK)
+    code, snapshot = run_job(tmp_path, check.CURRENT)
     assert code == 1 and snapshot["status"] == live.FAILED
     assert "Connection refused" in "\n".join(ui.result_lines(snapshot, PLAIN))
 
@@ -278,7 +278,7 @@ def test_compare_reports_each_round():
 
 
 SNAPSHOT = {
-    "mode": check.FULL, "services": ["youtube", "discord"], "service": "youtube", "index": 0, "started": 1000.0,
+    "mode": check.QUICK, "services": ["youtube", "discord"], "service": "youtube", "index": 0, "started": 1000.0,
     "fraction": 0.25, "phase": "search", "tested": 12, "pool": 296, "probes": 340, "detail": "mode=split",
     "best": {"text": "mode=fake_disorder", "lb": 0.9, "rate": 1.0, "targets": {}},
     "table": {"a": dict(row(9), label="www.youtube.com как Chrome")}, "verdicts": {"ok": 9, "tls_reset": 1}, "log": [],
@@ -287,7 +287,7 @@ SNAPSHOT = {
 
 def test_live_screen_shows_what_is_happening():
     text = "\n".join(ui.render(SNAPSHOT, PLAIN, now=1100.0))
-    for part in ("полный подбор", "YouTube (1 из 2)", "25 %", "прошло 01:40", "≈ 05:00", "поиск стратегий",
+    for part in ("быстрая проверка", "YouTube (1 из 2)", "25 %", "прошло 01:40", "≈ 05:00", "поиск стратегий",
                  "проверено 12 из 296", "Лучшая пока: mode=fake_disorder", "www.youtube.com как Chrome", "9/10",
                  "сброс 1", "adf watch"):
         assert part in text
@@ -303,7 +303,7 @@ def result(**fields):
 
 
 def final(*results, **fields):
-    return dict({"mode": check.QUICK, "status": live.FINISHED, "results": list(results), "report": "r.md"}, **fields)
+    return dict({"mode": check.CURRENT, "status": live.FINISHED, "results": list(results), "report": "r.md"}, **fields)
 
 
 def test_result_says_when_dns_is_at_fault():
@@ -387,17 +387,137 @@ def test_service_choice(monkeypatch, capsys):
     assert ui.choose_services(["discord"]) == ["discord"]
 
 
+def test_all_services_at_once(monkeypatch, capsys):
+    answers(monkeypatch, str(len(check.SERVICES) + 1))
+    assert ui.choose_services(["youtube"]) == list(check.SERVICES)
+
+
+def test_going_back_picks_nothing(monkeypatch, capsys):
+    answers(monkeypatch, "0")
+    assert ui.choose_services(["youtube"]) == []
+
+
+def test_sections_are_offered_by_their_names_on_the_router(monkeypatch, capsys):
+    answers(monkeypatch, "1")
+    assert ui.choose_sections(as_fetched(), ["youtube"]) == {"youtube": "YouTube_desync"}
+    out = capsys.readouterr().out
+    assert "YouTube_desync: YouTube" in out and "Meta: Instagram" in out and "Off" not in out
+
+
+def test_all_sections_at_once(monkeypatch, capsys):
+    answers(monkeypatch, "3")
+    assert ui.choose_sections(as_fetched(), []) == {"youtube": "YouTube_desync", "instagram": "Meta"}
+
+
+def test_section_without_a_known_service_is_matched_by_asking(monkeypatch, capsys):
+    parsed = {"Mine": {".type": "section", "action": "desync", "community_lists": "custom"}}
+    answers(monkeypatch, "1", "2")
+    assert ui.choose_sections(parsed, []) == {"discord": "Mine"}
+    assert "сервис не определён" in capsys.readouterr().out
+
+
+def test_router_without_sections_says_so(capsys):
+    assert ui.choose_sections({}, []) == {}
+    assert "нет работающих секций" in capsys.readouterr().out
+
+
+def test_search_budget_leaves_room_for_the_final_measurement():
+    assert check.search_seconds(check.QUICK, check.QUICK_MINUTES) == 20 * 60 - 5 * 60 - 60
+    assert check.search_seconds(check.FULL, 60) == 60 * 60 - 10 * 60 - 60
+    assert check.search_seconds(check.QUICK, 1) == check.MIN_SEARCH_S
+
+
+def test_time_is_planned_per_service():
+    assert check.planned_minutes(check.Spec(check.QUICK, ["a", "b"], 15)) == 30
+    assert ui._duration(90) == "1 ч 30 мин" and ui._duration(60) == "1 ч" and ui._duration(15) == "15 мин"
+
+
+def test_chosen_section_is_measured(tmp_path):
+    cfg = AppConfig(db=tmp_path / "adf.sqlite", stop_file=tmp_path / "STOP")
+    spec = check.Spec(check.CURRENT, ["youtube"], simulate=True, sections={"youtube": "Mine"})
+    job = check.Job(cfg, spec, tmp_path / "check.json", tmp_path / "reports", cli)
+    parsed = {"Mine": {".type": "section", "action": "desync", "desync_preset": "custom", "desync_mode": "split",
+                       "desync_split_pos": "1"}}
+    section, variant, _ = job._current("youtube", parsed, TachyonDesync())
+    assert section == "Mine" and variant.label == "сейчас: Mine"
+    with pytest.raises(ValueError, match="Other"):
+        job.spec.sections["youtube"] = "Other"
+        job._current("youtube", parsed, TachyonDesync())
+
+
+def test_job_gets_the_chosen_section(tmp_path, monkeypatch):
+    seen = {}
+
+    class Started:
+        pid = 1
+
+    def popen(command, **kw):
+        seen["command"] = command
+        return Started()
+    monkeypatch.setenv("ADF_HOME", str(tmp_path))
+    monkeypatch.setattr(subprocess, "Popen", popen)
+    check.spawn(check.Spec(check.CURRENT, ["youtube"], sections={"youtube": "Mine"}))
+    assert seen["command"][-2:] == ["--sections", "youtube=Mine"]
+
+
+def test_explicit_section_reaches_the_job_spec(tmp_path, monkeypatch):
+    seen = {}
+    monkeypatch.setenv("ADF_HOME", str(tmp_path))
+    monkeypatch.setattr(ui, "start_check", lambda spec, cli_, attach=True: seen.update(spec=spec) or 0)
+    cli.main(["check", "--services", "youtube", "--sections", "youtube=Mine"])
+    assert seen["spec"].mode == check.CURRENT and seen["spec"].sections == {"youtube": "Mine"}
+    cli.main(["check", "--quick", "--services", "youtube"])
+    assert seen["spec"].mode == check.QUICK and seen["spec"].minutes == check.QUICK_MINUTES
+    cli.main(["check", "--full", "--services", "youtube"])
+    assert seen["spec"].mode == check.FULL and seen["spec"].minutes == check.FULL_MINUTES
+
+
 def test_menu_starts_the_chosen_check(monkeypatch, capsys):
     started = []
     monkeypatch.setattr(ui, "start_check", lambda spec, cli_: started.append(spec))
     monkeypatch.setattr(live, "read", lambda path: None)
-    answers(monkeypatch, "1", "2", "2", "1", "15", "0")
+    answers(monkeypatch, "1", "2", "", "", "2", "1", "90", "", "1", "0", "2", "1", "", "0", "0")
     cfg = AppConfig()
     cfg.router.host = "192.168.8.1"
     assert ui.menu(cli, None, cfg) == 0
-    assert [(s.mode, s.services) for s in started] == [(check.QUICK, ["discord"]), (check.FULL, ["youtube"])]
-    assert started[1].minutes == 15.0
+    assert [(s.mode, s.services, s.minutes) for s in started] == [(check.QUICK, ["discord"], check.QUICK_MINUTES),
+                                                                  (check.FULL, ["youtube"], 90.0)]
     assert "root@192.168.8.1" in capsys.readouterr().out
+
+
+def test_menu_checks_the_section_picked_on_this_router(monkeypatch, capsys):
+    started = []
+    monkeypatch.setattr(ui, "start_check", lambda spec, cli_: started.append(spec))
+    monkeypatch.setattr(live, "read", lambda path: None)
+    monkeypatch.setattr(cli, "_uci_text", lambda cfg, args: "\n".join(
+        line for line in UCI_SHOW.splitlines() if re.search(tachyon_int.UCI_FILTER, line)))
+    answers(monkeypatch, "3", "1", "", "0")
+    cfg = AppConfig()
+    cfg.router.host = "r"
+    ui.menu(cli, None, cfg)
+    assert [(s.mode, s.sections) for s in started] == [(check.CURRENT, {"youtube": "YouTube_desync"})]
+
+
+def test_menu_survives_a_router_that_does_not_answer(monkeypatch, capsys):
+    def broken(cfg, args):
+        raise cli.BackendError("no route to host")
+    monkeypatch.setattr(cli, "_uci_text", broken)
+    monkeypatch.setattr(live, "read", lambda path: None)
+    answers(monkeypatch, "3", "0")
+    cfg = AppConfig()
+    cfg.router.host = "r"
+    assert ui.menu(cli, None, cfg) == 0
+    assert "Роутер не ответил" in capsys.readouterr().out
+
+
+def test_menu_keeps_rollback_connection_and_exit_numbers(monkeypatch, capsys):
+    monkeypatch.setattr(live, "read", lambda path: None)
+    answers(monkeypatch, "0")
+    cfg = AppConfig()
+    cfg.router.host = "r"
+    ui.menu(cli, None, cfg)
+    out = capsys.readouterr().out
+    assert "4  Откатить стратегию" in out and "5  Подключение к роутеру" in out and "0  Выход" in out
 
 
 def test_menu_rolls_back_only_the_named_section(monkeypatch):
@@ -459,7 +579,7 @@ def test_unknown_service_is_refused(tmp_path, monkeypatch):
 
 def test_check_outlives_the_command_that_started_it(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("ADF_HOME", str(tmp_path))
-    spec = check.Spec(check.QUICK, ["github"], simulate=True)
+    spec = check.Spec(check.CURRENT, ["github"], simulate=True)
     assert ui.start_check(spec, cli, attach=False) == 0
     assert "adf watch" in capsys.readouterr().out
     deadline = time.monotonic() + 60

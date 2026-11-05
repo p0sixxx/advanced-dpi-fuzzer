@@ -486,8 +486,11 @@ def cmd_check(args: argparse.Namespace) -> int:
     unknown = [s for s in services if s not in check_job.SERVICES]
     if unknown:
         raise SystemExit(f"unknown service: {', '.join(unknown)}; available: {', '.join(check_job.SERVICES)}")
-    spec = check_job.Spec(args.mode or (check_job.FULL if args.full else check_job.QUICK), services,
-                          args.minutes or check_job.FULL_MINUTES, args.simulate, args.config)
+    mode = args.mode or (check_job.FULL if args.full else check_job.QUICK if args.quick else check_job.CURRENT)
+    sections = dict(part.split("=", 1) for part in args.sections.split(",")) if args.sections else {}
+    spec = check_job.Spec(mode, services, args.minutes or (check_job.QUICK_MINUTES if mode == check_job.QUICK
+                                                           else check_job.FULL_MINUTES),
+                          args.simulate, args.config, sections)
     if args.job:
         check_job.keep_awake()
         return check_job.Job(cfg, spec, check_job.state_path(), check_job.reports_path(), sys.modules[__name__]).run()
@@ -649,15 +652,16 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--key", help="SSH key to use (default: ~/.ssh/adf_router, created if missing)")
     sp.set_defaults(func=cmd_setup)
 
-    sp = sub.add_parser("check", help="quick check of the current setup or a full search, with live progress")
-    sp.add_argument("--quick", action="store_true", help="does the current setup work (default, a few minutes)")
-    sp.add_argument("--full", action="store_true", help="search for a better strategy, then compare it with the current")
+    sp = sub.add_parser("check", help="check the current strategy, or search for a better one, with live progress")
+    sp.add_argument("--quick", action="store_true", help=f"short search, up to {check_job.QUICK_MINUTES} min per service")
+    sp.add_argument("--full", action="store_true", help=f"long search, about {check_job.FULL_MINUTES} min per service")
     sp.add_argument("--services", help=f"comma list: {','.join(check_job.SERVICES)}")
-    sp.add_argument("--minutes", type=float, help=f"time budget of a full check (default {check_job.FULL_MINUTES})")
+    sp.add_argument("--sections", help="section to use for a service, by its name on the router: youtube=YouTube_desync,…")
+    sp.add_argument("--minutes", type=float, help="time budget for each service")
     sp.add_argument("--simulate", action="store_true", help="use the DPI simulator (no network)")
     sp.add_argument("--detach", action="store_true", help="start and return; see it later with adf watch")
     sp.add_argument("--job", action="store_true", help=argparse.SUPPRESS)
-    sp.add_argument("--mode", choices=(check_job.QUICK, check_job.FULL), help=argparse.SUPPRESS)
+    sp.add_argument("--mode", choices=(check_job.CURRENT, check_job.QUICK, check_job.FULL), help=argparse.SUPPRESS)
     sp.set_defaults(func=cmd_check)
 
     sp = sub.add_parser("watch", help="follow a running check, or show the last result")
