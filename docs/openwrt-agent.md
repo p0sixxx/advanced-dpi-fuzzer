@@ -58,6 +58,11 @@ end
 
 `ADF_STATE`, `ADF_CORE`, `ADF_CORE_CONFIG`, `ADF_BYEDPI`, `ADF_MIN_MEM_KB`, `ADF_CURL`.
 
+## Файлы на ПК
+
+`~/.adf` (или `ADF_HOME`): `config.toml` пишет `adf setup`, `check.json` хранит состояние идущей проверки,
+`check.log` содержит вывод её процесса, `reports/` содержит отчёты, `adf.sqlite` содержит результаты.
+
 ## Нагрузка
 
 Один временный процесс ядра, последовательные запросы с паузой ≥ 250 мс, пакеты не чаще 1 в

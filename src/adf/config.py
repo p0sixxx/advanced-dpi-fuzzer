@@ -3,12 +3,25 @@ SSH authentication is delegated to ssh keys / ssh-agent."""
 
 from __future__ import annotations
 
+import os
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-DEFAULT_HOME = Path.home() / ".adf"
+
+
+def adf_home() -> Path:
+    return Path(os.environ.get("ADF_HOME") or Path.home() / ".adf")
+
+
+DEFAULT_HOME = adf_home()
+
+
+def default_config() -> Optional[Path]:
+    """Written by `adf setup`; an explicit -c takes its place."""
+    path = adf_home() / "config.toml"
+    return path if path.exists() else None
 
 
 @dataclass

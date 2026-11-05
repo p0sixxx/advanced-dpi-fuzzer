@@ -32,12 +32,12 @@ ALL_DESYNC_OPTIONS = sorted(set(OPTION_FOR_KEY.values()) | {"desync_preset", "de
 _LINE = re.compile(r"^([A-Za-z0-9_-]+)\.([A-Za-z0-9_@\[\]-]+)(?:\.([A-Za-z0-9_-]+))?=(.*)$")
 
 
-# Only these lines are fetched from the router: section types, desync-related options
-# and references between sections (ids only). Subscription URLs, keys and other options
-# never leave the router.
+# Only these lines are fetched from the router: section types, desync-related options, what
+# ties a section to a service (list names) and references between sections (ids only).
+# Subscription URLs, keys and other options never leave the router.
 UCI_FILTER = (r"^tachyon\.[^.=]+=(section|outbound_source)$|"
-              r"^tachyon\.[^.=]+\.(action|source_type|outbound_source_refs|source_refs|outbound_group_levels|"
-              r"desync_[a-z0-9_]+)=")
+              r"^tachyon\.[^.=]+\.(action|enabled|community_lists|condition_refs|source_type|outbound_source_refs|"
+              r"source_refs|outbound_group_levels|desync_[a-z0-9_]+)=")
 SHOW_DESYNC_CMD = f"uci -q show {CONFIG} | grep -E '{UCI_FILTER}'"
 
 

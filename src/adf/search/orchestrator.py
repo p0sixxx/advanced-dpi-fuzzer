@@ -111,7 +111,11 @@ class Orchestrator:
     def __init__(self, store: Store, backend: Backend, engine: Engine, targets: Sequence[Target],
                  controls: Sequence[Target], config: Optional[SearchConfig] = None, guard: Optional[Guard] = None,
                  caps: Optional[Capabilities] = None, extra: Sequence[Strategy] = (),
-                 log: Optional[Callable[[str], None]] = None):
+                 log: Optional[Callable[[str], None]] = None,
+                 on_progress: Optional[Callable[[Dict[str, Any]], None]] = None):
+        self.on_progress = on_progress
+        self.phase = "baseline"
+        self.current_text = ""
         self.store = store
         self.backend = backend
         self.engine = engine
@@ -180,6 +184,23 @@ class Orchestrator:
             sc = self.scores[sid] = StrategyScore(sid, complexity=c.strategy.complexity if c else 0.0)
         return sc
 
+    def progress(self) -> Dict[str, Any]:
+        """What a watcher needs: the strategy that leads so far and how far the budget went."""
+        scored = [(sid, sc) for sid, sc in self.run_scores.items()
+                  if sid in self.pool and not self.pool[sid].invalid and sc.n_total > 0]
+        leader = None
+        if scored:
+            sid, sc = max(scored, key=lambda kv: (kv[1].lb, kv[1].rate, kv[1].n_total))
+            leader = {"text": self.pool[sid].strategy.text, "lb": round(sc.lb, 3), "rate": round(sc.rate, 3),
+                      "targets": {t.target: [round(t.k, 1), round(t.n, 1)] for t in sc.targets.values()}}
+        return {"phase": self.phase, "fraction": round(self.guard.fraction_used(), 4), "current": self.current_text,
+                "tested": len(scored), "pool": len(self.pool), "probes": self.guard.probes,
+                "verdicts": dict(self.verdicts), "best": leader}
+
+    def _tick(self) -> None:
+        if self.on_progress:
+            self.on_progress(self.progress())
+
     def _record(self, sid: Optional[str], results: Sequence[ProbeResult], phase: str) -> None:
         self.store.add_trials(self.run_id, sid, results, self.cfg.network_id, self.epoch, self.simulated, phase)
         for r in results:
@@ -227,8 +248,11 @@ class Orchestrator:
 
     def _batch(self, cand: Optional[Candidate], targets: Sequence[Target], reps: int, phase: str,
                stop_on_fail: bool = False) -> BatchResult:
+        self._tick()        # scores of the previous batch are in by now
         self.guard.before_batch()
         params = None if cand is None else cand.strategy.params
+        if cand is not None:
+            self.current_text = cand.strategy.text
         try:
             batch = self.backend.run_batch(self.engine, params, targets, self.ips, reps=reps,
                                            stop_on_fail=stop_on_fail)
@@ -437,6 +461,10 @@ class Orchestrator:
         self._maybe_control(force=no_ok and had_success_before)
         return batch
 
+    def _enter(self, phase: str) -> None:
+        self.phase = phase
+        self._tick()
+
     def _measure_extra(self) -> None:
         """Strategies named by the user are measured first: in a pool of hundreds their turn may never come."""
         for s in self.extra:
@@ -625,8 +653,11 @@ class Orchestrator:
             self.log(f"candidate pool: {len(self.pool)} strategies")
             if self.cfg.use_history:
                 self._revalidate()
+            self._enter("search")
             self._search()
+            self._enter("simplify")
             optimized = self._simplify()
+            self._enter("final")
             self._final(self._pick_finalists(optimized))
         except StopRequested as e:
             status = "stopped"

@@ -11,7 +11,9 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from . import __version__
 from .bench import bench, bench_table
-from .config import AppConfig, load_config
+from . import check as check_job
+from . import connect, console, ui
+from .config import AppConfig, default_config, load_config
 from .db import Store
 from .engines import ENGINES, StrategyError, TachyonDesync, get_engine
 from .engines.tachyon_desync import caps_test_matrix, capabilities_from_probe
@@ -37,7 +39,7 @@ def eprint(*a: Any) -> None:
 
 # ------------------------------------------------------------------ plumbing
 def _cfg(args: argparse.Namespace) -> AppConfig:
-    cfg = load_config(Path(args.config) if args.config else None)
+    cfg = load_config(Path(args.config) if args.config else default_config())
     if getattr(args, "db", None):
         cfg.db = Path(args.db)
     if getattr(args, "ssh", None):
@@ -478,13 +480,44 @@ def cmd_stop(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_check(args: argparse.Namespace) -> int:
+    cfg = _cfg(args)
+    services = (args.services or ",".join(cfg.search.categories) or "youtube").split(",")
+    unknown = [s for s in services if s not in check_job.SERVICES]
+    if unknown:
+        raise SystemExit(f"unknown service: {', '.join(unknown)}; available: {', '.join(check_job.SERVICES)}")
+    spec = check_job.Spec(args.mode or (check_job.FULL if args.full else check_job.QUICK), services,
+                          args.minutes or check_job.FULL_MINUTES, args.simulate, args.config)
+    if args.job:
+        check_job.keep_awake()
+        return check_job.Job(cfg, spec, check_job.state_path(), check_job.reports_path(), sys.modules[__name__]).run()
+    return ui.start_check(spec, sys.modules[__name__], attach=not args.detach)
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    return ui.watch(sys.modules[__name__], args.config)
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    return ui.status()
+
+
+def cmd_setup(args: argparse.Namespace) -> int:
+    return connect.setup(args.host, args.user, args.port, args.key)
+
+
+def cmd_menu(args: argparse.Namespace) -> int:
+    return ui.menu(sys.modules[__name__], args.config, _cfg(args))
+
+
 # -------------------------------------------------------------------- parser
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="adf", description="Advanced Adaptive DPI Fuzzer")
     p.add_argument("--version", action="version", version=f"adf {__version__}")
     p.add_argument("-c", "--config", help="TOML config (examples/config.toml)")
     p.add_argument("--db", help="SQLite database path (default ~/.adf/adf.sqlite)")
-    sub = p.add_subparsers(dest="cmd", required=True)
+    p.set_defaults(func=cmd_menu)
+    sub = p.add_subparsers(dest="cmd")
 
     def where(sp: argparse.ArgumentParser, simulate: bool = True) -> None:
         g = sp.add_mutually_exclusive_group()
@@ -609,6 +642,30 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("path", nargs="?")
     sp.set_defaults(func=cmd_db)
 
+    sp = sub.add_parser("setup", help="connect this PC to the router: finds it, creates and installs an SSH key")
+    sp.add_argument("--host", help="router address (default: the default gateway)")
+    sp.add_argument("--user", default="root")
+    sp.add_argument("--port", type=int, default=22)
+    sp.add_argument("--key", help="SSH key to use (default: ~/.ssh/adf_router, created if missing)")
+    sp.set_defaults(func=cmd_setup)
+
+    sp = sub.add_parser("check", help="quick check of the current setup or a full search, with live progress")
+    sp.add_argument("--quick", action="store_true", help="does the current setup work (default, a few minutes)")
+    sp.add_argument("--full", action="store_true", help="search for a better strategy, then compare it with the current")
+    sp.add_argument("--services", help=f"comma list: {','.join(check_job.SERVICES)}")
+    sp.add_argument("--minutes", type=float, help=f"time budget of a full check (default {check_job.FULL_MINUTES})")
+    sp.add_argument("--simulate", action="store_true", help="use the DPI simulator (no network)")
+    sp.add_argument("--detach", action="store_true", help="start and return; see it later with adf watch")
+    sp.add_argument("--job", action="store_true", help=argparse.SUPPRESS)
+    sp.add_argument("--mode", choices=(check_job.QUICK, check_job.FULL), help=argparse.SUPPRESS)
+    sp.set_defaults(func=cmd_check)
+
+    sp = sub.add_parser("watch", help="follow a running check, or show the last result")
+    sp.set_defaults(func=cmd_watch)
+
+    sp = sub.add_parser("status", help="state of the check, once")
+    sp.set_defaults(func=cmd_status)
+
     sp = sub.add_parser("stop", help="request a graceful stop of a running search")
     where(sp, simulate=False)
     sp.set_defaults(func=cmd_stop)
@@ -616,8 +673,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    console.prepare()
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.cmd is None and not (sys.stdin.isatty() and sys.stdout.isatty()):
+        parser.print_help()
+        return 2
     try:
         return int(args.func(args) or 0)
     except (BackendError, StrategyError, ValueError) as e:
@@ -625,6 +686,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 1
     except BrokenPipeError:  # output piped into head & co.
         return 0
+    except KeyboardInterrupt:   # a running check lives on in its own process
+        print()
+        return 130
 
 
 if __name__ == "__main__":

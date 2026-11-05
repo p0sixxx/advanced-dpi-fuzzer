@@ -412,7 +412,7 @@ class AgentBackend(Backend):
 
     def prepare_dns(self, hosts: Sequence[str]) -> None:
         s = self.settings
-        if s.dns_server != AUTO:
+        if s.dns_server != AUTO or (hosts and all(self._live.get(host) for host in hosts)):
             return
         found = self._live_dns()
         server = found.get("server")

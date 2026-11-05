@@ -59,7 +59,8 @@ def _dns_check(backend: Backend, engine: Engine, variants: Sequence[Variant], ro
 
 def compare(store: Store, backend: Backend, engine: Engine, variants: Sequence[Variant], targets: Sequence[Target],
             controls: Sequence[Target], ips: Mapping[str, Sequence[str]], reps: int, network_id: str, guard: Guard,
-            log: Callable[[str], None] = lambda m: None) -> Dict[str, Any]:
+            log: Callable[[str], None] = lambda m: None, on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+            dns_check: bool = True) -> Dict[str, Any]:
     guard.start()
     core = str(backend.env().get("core_version") or "")
     run_id = store.start_run(network_id, engine.name, core, getattr(backend, "name", "?"),
@@ -76,6 +77,7 @@ def compare(store: Store, backend: Backend, engine: Engine, variants: Sequence[V
             store.upsert_strategy(Strategy(engine="tachyon_raw", params_json=json.dumps(v.outbound, sort_keys=True),
                                            text=v.text, complexity=0.0, origin="compare", name=v.label, id=v.id))
     rejected: Dict[str, str] = {}
+    verdicts: Dict[str, int] = {}
     discarded = 0
     status = "finished"
     rnd = 0
@@ -113,8 +115,12 @@ def compare(store: Store, backend: Backend, engine: Engine, variants: Sequence[V
                 for r in b.results:
                     if r.counts and r.target in req:
                         scores[v.id].stats(r.target, req[r.target]).add(r.ok, r.ttfb_ms, r.verdict)
+                    verdicts[r.verdict] = verdicts.get(r.verdict, 0) + 1
             rnd += 1
             log(f"round {rnd}/{reps} done")
+            if on_progress:
+                on_progress({"round": rnd, "rounds": reps, "fraction": rnd / reps, "probes": guard.probes,
+                             "verdicts": dict(verdicts), "rows": [scores[v.id].to_dict() for v in variants]})
     except Exception as e:  # StopRequested or backend error: keep what was measured
         status = f"stopped: {e}"
     rows = []
@@ -126,7 +132,8 @@ def compare(store: Store, backend: Backend, engine: Engine, variants: Sequence[V
     summary = {"status": status, "simulated": sim, "rounds": rnd, "discarded_rounds": discarded, "rows": rows,
                "targets": [t.id for t in targets], "reps": reps, "network_id": network_id, "run_id": run_id,
                "engine_version": core}
-    summary["dns_check"] = (_dns_check(backend, engine, variants, rows, targets, ips, log) if status == "finished"
+    summary["dns_check"] = (_dns_check(backend, engine, variants, rows, targets, ips, log)
+                            if status == "finished" and dns_check
                             else dict(backend.dns_info(), rows=[], error=""))
     store.finish_run(run_id, status, summary)
     return summary
