@@ -12,6 +12,7 @@
 #   adf-agent version
 #   adf-agent env                       -> one JSON line describing the host
 #   adf-agent resolve <host> [server]   -> one IP per line (A and AAAA)
+#   adf-agent live-dns                  -> one JSON line with the DNS server of the live core
 #   adf-agent caps < tests              -> JSON lines {key,value,ok}; tests are
 #                                          "key<TAB>value<TAB>config-json" lines
 #   adf-agent run < job                 -> JSON lines, see docs/openwrt-agent.md
@@ -27,6 +28,7 @@
 #                                        <seconds>, until `stop`
 #
 # Environment overrides: ADF_STATE (/tmp/adf-agent), ADF_CORE (tachyon-core path),
+# ADF_CORE_CONFIG (config of the live core, read-only),
 # ADF_BYEDPI (ciadpi path), ADF_MIN_MEM_KB (24576), ADF_CURL (curl).
 
 ADF_AGENT_VERSION="0.1.0"
@@ -155,6 +157,25 @@ cmd_resolve() {
 		seen && /^Address/ {
 			for (i = 2; i <= NF; i++) { a=$i; sub(/#.*/, "", a); if (a ~ /^[0-9a-fA-F.:]+$/ && a != "") print a }
 		}' | sort -u
+}
+
+dns_server_json() {
+	# $1 config, $2 tag; only this object leaves the config, which also holds proxy credentials
+	[ -n "$2" ] || return 0
+	jsonfilter -i "$1" -e "@.dns.servers[@.tag=\"$2\"]" 2>/dev/null | tr -d '\n'
+}
+
+cmd_live_dns() {
+	cfg=${ADF_CORE_CONFIG:-/etc/tachyon-core/config.json}
+	if [ ! -r "$cfg" ] || ! command -v jsonfilter >/dev/null 2>&1; then
+		printf '{"t":"dns","server":null,"bootstrap":null}\n'
+		return 0
+	fi
+	final=$(jsonfilter -i "$cfg" -e '@.dns.final' 2>/dev/null)
+	server=$(dns_server_json "$cfg" "$final")
+	resolver=$(jsonfilter -i "$cfg" -e "@.dns.servers[@.tag=\"$final\"].domain_resolver" 2>/dev/null)
+	bootstrap=$(dns_server_json "$cfg" "$resolver")
+	printf '{"t":"dns","server":%s,"bootstrap":%s}\n' "${server:-null}" "${bootstrap:-null}"
 }
 
 cmd_caps() {
@@ -354,10 +375,11 @@ case "$1" in
 	version) echo "$ADF_AGENT_VERSION" ;;
 	env) cmd_env ;;
 	resolve) shift; cmd_resolve "$@" ;;
+	live-dns) cmd_live_dns ;;
 	caps) cmd_caps ;;
 	run) cmd_run ;;
 	hold) shift; cmd_hold "$@" ;;
 	stop) ensure_state; kill_engine; release_lock; echo '{"t":"stopped"}' ;;
 	tachyon-probe) shift; cmd_tachyon_probe "$@" ;;
-	*) echo "usage: adf-agent {version|env|resolve|caps|run|hold|stop|tachyon-probe}" >&2; exit 1 ;;
+	*) echo "usage: adf-agent {version|env|resolve|live-dns|caps|run|hold|stop|tachyon-probe}" >&2; exit 1 ;;
 esac

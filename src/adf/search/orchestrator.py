@@ -40,6 +40,7 @@ from ..probe.model import PATH_VERDICTS, BatchResult, ProbeResult, Target, summa
 from ..safety import Guard, StopRequested
 from ..scoring import CLASS_ORDER, StrategyScore, Thresholds, non_inferior
 from ..strategy import Strategy, make_strategy
+from .dnscheck import run_check
 
 BASELINE = "baseline"
 SEARCH = "search"
@@ -271,6 +272,7 @@ class Orchestrator:
     def _environment(self) -> Dict[str, Any]:
         env = self.backend.env()
         self.engine_version = str(env.get("core_version") or env.get("agent") or "unknown")
+        self.backend.prepare_dns([t.host for t in self.all_targets + self.controls if t.host])
         for t in self.all_targets + self.controls:
             if t.id in self.ips or not t.host:
                 continue
@@ -636,9 +638,22 @@ class Orchestrator:
             status = "aborted"
             error = str(e)
         summary = self.summary(env, optimized, status, error, time.monotonic() - started)
+        summary["dns_check"] = self._dns_check(summary.get("best"), status)
         if self.run_id:
             self.store.finish_run(self.run_id, status, summary)
         return summary
+
+    def _dns_check(self, best: Optional[Mapping[str, Any]], status: str) -> Dict[str, Any]:
+        """Runs after the budget is spent: it decides how to read the result of the whole search."""
+        if not best or status != "finished":
+            return dict(self.backend.dns_info(), rows=[], error="")
+
+        def measure(targets: Sequence[Target], ips: Mapping[str, Sequence[str]], reps: int) -> BatchResult:
+            return self.backend.run_batch(self.engine, best["params"], targets, ips, reps=reps)
+        try:
+            return run_check(self.backend, measure, self.active, self.ips, self.log)
+        except BackendError as e:
+            return dict(self.backend.dns_info(), rows=[], error=str(e))
 
     # ============================================================== summary
     def summary(self, env: Mapping[str, Any], optimized: Optional[Tuple[Candidate, List[str]]], status: str,

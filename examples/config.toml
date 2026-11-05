@@ -18,7 +18,8 @@ engine_start_s = 10         # time for the temporary engine to open its port; ra
 large_hello = true          # also probe with a browser-size ClientHello; needs TCP forwarding in the router's sshd
 interval_ms = 250           # pause between requests
 routing_mark = 134217728    # 0x08000000: Tachyon's bypass mark (NFT_OUTBOUND_MARK)
-dns_server = "77.88.8.8"    # resolver used for CDN IPs (same as Tachyon's fuzzer)
+dns_server = "auto"         # CDN addresses come from the live core's DNS server; an address here overrides it
+dns_check = true            # compare them with an independent resolver and measure where they differ
 
 [search]
 network_id = "home-isp"     # results are kept per network/ISP

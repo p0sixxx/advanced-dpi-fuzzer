@@ -69,7 +69,7 @@ def _backend(cfg: AppConfig, args: argparse.Namespace) -> Backend:
     return AgentBackend(t, ProbeSettings(port=p.port, timeout_s=p.timeout_s, connect_timeout_s=p.connect_timeout_s,
                                          engine_start_s=p.engine_start_s, interval_ms=p.interval_ms,
                                          routing_mark=p.routing_mark,
-                                         dns_server=p.dns_server, cacert=getattr(args, "cacert", None)))
+                                         dns_server=p.dns_server, dns_check=p.dns_check, cacert=getattr(args, "cacert", None)))
 
 
 def _targets(cfg: AppConfig, args: argparse.Namespace) -> tuple:
@@ -387,6 +387,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
             variants.append(Variant("Advanced DPI Fuzzer best", strategy=store.get_strategy(board[0]["strategy_id"])))
     if len(variants) < 2:
         raise SystemExit("need at least two variants (Adaptive 2.0, --strategy ..., --best)")
+    backend.prepare_dns([t.host for t in targets + controls if t.host])
     ips = {t.id: backend.resolve(t.host)[: t.max_ips] for t in targets + controls}
     guard = Guard(Budget(max_batches=10 ** 6, max_probes=10 ** 7, max_seconds=86400),
                   SafetyPolicy(min_batch_interval_s=0 if args.simulate else cfg.search.min_batch_interval_s,

@@ -31,7 +31,8 @@ class ProbeConfig:
     interval_ms: int = 250
     large_hello: bool = True        # also probe with a browser-size ClientHello
     routing_mark: Optional[int] = 0x08000000
-    dns_server: str = "77.88.8.8"
+    dns_server: str = "auto"        # "auto": the DNS server of the live core, or this resolver's address
+    dns_check: bool = True          # compare the addresses with an independent resolver
 
 
 @dataclass

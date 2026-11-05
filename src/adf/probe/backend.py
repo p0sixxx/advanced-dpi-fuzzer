@@ -27,6 +27,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 
 from ..engines import ByeDPI, Engine, TachyonDesync
 from ..engines.tachyon_desync import FAKE_MODES
+from .dns import A, AAAA, AUTO, FALLBACK_SERVER, ask, check_server, describe, resolver_config
 from .hello import PROXY_TIMEOUT_S, ProxyFailure, Stream, client_hello, exchange, socks5_open
 from .model import LARGE_HELLO, BatchResult, ProbeResult, Target, classify
 
@@ -263,6 +264,16 @@ class Backend:
     def resolve(self, host: str) -> List[str]:
         return []
 
+    def prepare_dns(self, hosts: Sequence[str]) -> None:
+        """Called once before ``resolve``, with every host the run needs."""
+
+    def other_addresses(self, host: str) -> List[str]:
+        """Addresses from the independent resolver."""
+        return []
+
+    def dns_info(self) -> Dict[str, str]:
+        return {"live": "", "check": "", "note": ""}
+
     def run_batch(self, engine: Engine, params: Optional[Mapping[str, Any]], targets: Sequence[Target],
                   ips: Mapping[str, Sequence[str]], reps: int = 1, stop_on_fail: bool = False) -> BatchResult:
         raise NotImplementedError
@@ -284,7 +295,8 @@ class ProbeSettings:
     engine_start_s: int = 10
     interval_ms: int = 250
     routing_mark: Optional[int] = TACHYON_BYPASS_MARK
-    dns_server: str = "77.88.8.8"   # same resolver Tachyon's fuzzer configures
+    dns_server: str = AUTO           # AUTO: the DNS server of the live core; otherwise this resolver
+    dns_check: bool = True           # compare with an independent resolver
     cacert: Optional[str] = None     # only for local test servers
     baseline_via_core: bool = True   # baseline through tachyon-core "direct" (same path as strategies)
 
@@ -295,6 +307,13 @@ class AgentBackend(Backend):
     def __init__(self, transport: Transport, settings: Optional[ProbeSettings] = None):
         self.transport = transport
         self.settings = settings or ProbeSettings()
+        self._live: Dict[str, List[str]] = {}
+        self._other: Dict[str, List[str]] = {}
+        self._dns: Dict[str, str] = {"live": self.plain_dns, "check": "", "note": "configured"}
+
+    @property
+    def plain_dns(self) -> str:
+        return FALLBACK_SERVER if self.settings.dns_server == AUTO else self.settings.dns_server
 
     # ---- helpers
     def core_config(self, engine: TachyonDesync, params: Optional[Mapping[str, Any]]) -> Dict[str, Any]:
@@ -307,7 +326,7 @@ class AgentBackend(Backend):
             outbound = engine.outbound(params, tag="adf-out", routing_mark=s.routing_mark)
         return {
             "log": {"level": "error"},
-            "dns": {"servers": [{"type": "udp", "tag": "adf-dns", "server": s.dns_server}], "final": "adf-dns"},
+            "dns": {"servers": [{"type": "udp", "tag": "adf-dns", "server": self.plain_dns}], "final": "adf-dns"},
             "inbounds": [{"type": "mixed", "tag": "adf-in", "listen": "127.0.0.1", "listen_port": s.port}],
             "outbounds": [outbound],
             "route": {"final": "adf-out"},
@@ -359,8 +378,70 @@ class AgentBackend(Backend):
         return lines[0] if lines else {}
 
     def resolve(self, host: str) -> List[str]:
-        out = self.transport.call(["resolve", host, self.settings.dns_server], timeout=30)
+        if self._live.get(host):
+            return self._live[host]
+        out = self.transport.call(["resolve", host, self.plain_dns], timeout=30)
         return usable_addresses(out.splitlines())
+
+    def other_addresses(self, host: str) -> List[str]:
+        return self._other.get(host, [])
+
+    def dns_info(self) -> Dict[str, str]:
+        return dict(self._dns)
+
+    def _live_dns(self) -> Dict[str, Any]:
+        try:
+            lines = parse_lines(self.transport.call(["live-dns"], timeout=30))
+        except BackendError:
+            return {}
+        return lines[0] if lines else {}
+
+    def _ask_all(self, port: int, hosts: Sequence[str]) -> Dict[str, List[str]]:
+        out: Dict[str, List[str]] = {}
+        stream = None
+        try:
+            stream = self.transport.connect("127.0.0.1", port, PROXY_TIMEOUT_S)
+            for host in hosts:
+                out[host] = usable_addresses(ask(stream, host, A) + ask(stream, host, AAAA))
+        except OSError:
+            pass                    # the rest stays unanswered and falls back to plain DNS
+        finally:
+            if stream is not None:
+                stream.close()
+        return out
+
+    def prepare_dns(self, hosts: Sequence[str]) -> None:
+        s = self.settings
+        if s.dns_server != AUTO:
+            return
+        found = self._live_dns()
+        server = found.get("server")
+        self._dns = {"live": FALLBACK_SERVER, "check": "", "note": "no_live_dns"}
+        if not isinstance(server, dict):
+            return
+        check = check_server(server) if s.dns_check else None
+        cfg = resolver_config(server, found.get("bootstrap"), check, s.port, s.routing_mark)
+        job = "\n".join(["ADF-JOB 1", f"port {s.port}", f"engine_start_s {int(s.engine_start_s)}", "engine tachyon",
+                         "config-begin", json.dumps(cfg), "config-end"]) + "\n"
+        try:
+            items = parse_lines(self.transport.call(["hold", "120"], stdin=job, timeout=30 + s.engine_start_s))
+        except BackendError:
+            self._dns["note"] = "core_failed"
+            return
+        if any(i.get("t") == "error" or (i.get("t") == "engine" and not i.get("ok")) for i in items):
+            self._dns["note"] = "core_failed"
+            return
+        try:
+            self._live = self._ask_all(s.port, hosts)
+            self._other = self._ask_all(s.port + 1, hosts) if check else {}
+        finally:
+            self.transport.call(["stop"], timeout=30)
+        answered = len({host for host in hosts if self._live.get(host)})
+        self._dns = {"live": describe(server) if answered else FALLBACK_SERVER,
+                     "check": describe(check) if self._other else "",
+                     "note": "" if answered == len(set(hosts)) else "partial" if answered else "no_answers"}
+        if server.get("detour"):
+            self._dns["note"] = "detour"
 
     def run_batch(self, engine: Engine, params: Optional[Mapping[str, Any]], targets: Sequence[Target],
                   ips: Mapping[str, Sequence[str]], reps: int = 1, stop_on_fail: bool = False) -> BatchResult:

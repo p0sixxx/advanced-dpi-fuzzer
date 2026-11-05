@@ -121,7 +121,7 @@ def client_hello(host: str, rng: Optional[random.Random] = None, size: int = HEL
     return record(exts + _ext(0x0015, bytes(filler)) + _ext(closing, b"\x00"))
 
 
-def _read_exact(stream: Stream, n: int, timeout: float) -> bytes:
+def read_exact(stream: Stream, n: int, timeout: float) -> bytes:
     deadline = time.monotonic() + timeout
     data = b""
     while len(data) < n:
@@ -136,7 +136,7 @@ def socks5_open(stream: Stream, host: str, port: int, timeout: float = PROXY_TIM
     """Open ``host:port`` through a SOCKS5 proxy: every engine ADF starts speaks it."""
     try:
         stream.send(b"\x05\x01\x00")
-        if _read_exact(stream, 2, timeout) != b"\x05\x00":
+        if read_exact(stream, 2, timeout) != b"\x05\x00":
             raise ProxyFailure("the proxy did not answer the greeting")
         try:
             ip = ipaddress.ip_address(host)
@@ -144,13 +144,13 @@ def socks5_open(stream: Stream, host: str, port: int, timeout: float = PROXY_TIM
         except ValueError:
             address = b"\x03" + _vec8(host.encode("idna"))
         stream.send(b"\x05\x01\x00" + address + _u16(port))
-        head = _read_exact(stream, 4, timeout)
+        head = read_exact(stream, 4, timeout)
         if len(head) < 4 or head[1] != 0:
             raise ProxyFailure(f"the proxy refused the connection: {head.hex()}")
         rest = {1: 4, 4: 16}.get(head[3])
         if rest is None:
-            rest = _read_exact(stream, 1, timeout)[0]
-        _read_exact(stream, rest + 2, timeout)
+            rest = read_exact(stream, 1, timeout)[0]
+        read_exact(stream, rest + 2, timeout)
     except (OSError, IndexError) as e:      # TimeoutError is an OSError
         raise ProxyFailure(f"the proxy is unavailable: {e}") from e
 
@@ -160,7 +160,7 @@ def exchange(stream: Stream, hello: bytes, timeout: float) -> Tuple[str, float, 
     started = time.monotonic()
     try:
         stream.send(hello)
-        reply = _read_exact(stream, 6, timeout)
+        reply = read_exact(stream, 6, timeout)
     except TimeoutError:
         return "tls_timeout", timeout * 1000, "no ServerHello"
     except OSError as e:

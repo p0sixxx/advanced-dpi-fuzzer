@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import Any, List, Mapping, Sequence
+from typing import Any, List, Mapping, Optional, Sequence
 
 
 def _fmt_targets(t: Mapping[str, Any]) -> str:
@@ -11,6 +11,51 @@ def _fmt_targets(t: Mapping[str, Any]) -> str:
     for tid, s in t.items():
         parts.append(f"{tid}: {s['k']:g}/{s['n']:g} (LB {s['lb']:.2f})")
     return "; ".join(parts)
+
+
+DNS_NOTES = {
+    "configured": "адрес задан в `[probe] dns_server`, DNS ядра и сверка не использовались",
+    "no_live_dns": "DNS живого ядра не найден, адреса взяты у запасного сервера, сверки не было",
+    "core_failed": "временное ядро не запустилось с DNS из живого конфига, адреса взяты у запасного сервера, "
+                   "сверки не было",
+    "no_answers": "DNS ядра не ответил, адреса взяты у запасного сервера",
+    "partial": "DNS ядра ответил не на все имена, остальные адреса взяты у запасного сервера",
+    "detour": "живой DNS идёт через секцию, а здесь запросы шли напрямую: ответы могут отличаться",
+}
+DNS_VERDICTS = {
+    "ok": "адрес DNS ядра работает",
+    "dns": "**виноват DNS**: стратегия работает на адресе сверки",
+    "strategy": "не работают оба адреса: дело в стратегии",
+    "unclear": "результат неоднозначен",
+}
+
+
+def dns_lines(check: Optional[Mapping[str, Any]]) -> List[str]:
+    if not check or not check.get("live"):
+        return []
+    lines = ["", "## Проверка DNS", "", f"* DNS ядра: `{check['live']}`"]
+    if check.get("check"):
+        lines.append(f"* Сверка: `{check['check']}`")
+    if check.get("note"):
+        lines.append(f"* {DNS_NOTES.get(check['note'], check['note'])}")
+    if check.get("error"):
+        lines.append(f"* Сверка не завершена: {check['error']}")
+    rows = check.get("rows") or []
+    if check.get("check") and not check.get("error") and not rows:
+        lines.append("* Сети адресов совпали, отдельная проверка не понадобилась.")
+    problems = [r for r in rows if r["verdict"] != "ok"]
+    if rows:
+        lines.append(f"* Адреса разошлись на {len(rows)} целях, лучшая стратегия проверена на обоих наборах. "
+                     f"На адресах DNS ядра она работает на {len(rows) - len(problems)} из них.")
+    if problems:
+        lines += ["", "| Цель | Адреса DNS ядра | Успехов | Адреса сверки | Успехов | Вывод |", "|---|---|---:|---|---:|---|"]
+        for r in problems:
+            lines.append(f"| {r['target']} | {', '.join(r['live']) or '—'} | {r['live_ok']}/{r['live_n']} | "
+                         f"{', '.join(r['other'])} | {r['other_ok']}/{r['other_n']} | {DNS_VERDICTS[r['verdict']]} |")
+    if any(r["verdict"] == "dns" for r in rows):
+        lines += ["", "**Результат поиска занижен:** DNS ядра отдаёт адреса, на которых стратегия не работает, а "
+                      "клиенты ходят именно на них. Смените основной DNS в Tachyon и повторите проверку."]
+    return lines
 
 
 def run_report(summary: Mapping[str, Any]) -> str:
@@ -38,6 +83,7 @@ def run_report(summary: Mapping[str, Any]) -> str:
     lines += ["", "## Baseline (без обхода)", "", "| Цель | Статус | Успехов | Вердикты |", "|---|---|---:|---|"]
     for tid, b in s["baseline"].items():
         lines.append(f"| {tid} | {b['status']} | {b['k']}/{b['n']} | {json.dumps(b['verdicts'], ensure_ascii=False)} |")
+    lines += dns_lines(s.get("dns_check"))
     best = s.get("best")
     lines += ["", "## Лучшая стратегия", ""]
     if best:
@@ -92,6 +138,7 @@ def compare_report(rows: Sequence[Mapping[str, Any]], meta: Mapping[str, Any]) -
     failed = [f"* {r['label']}: {r['error']}" for r in rows if r.get("error")]
     if failed:
         lines += ["", "Движок не запустился:", *failed]
+    lines += dns_lines(meta.get("dns_check"))
     lines += ["", "LB — нижняя граница 95 % доверительного интервала Уилсона. Разница считается значимой, "
                   "только если интервалы не перекрываются."]
     return "\n".join(lines) + "\n"

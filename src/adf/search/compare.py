@@ -14,11 +14,12 @@ from typing import Any, Callable, Dict, Mapping, Optional, Sequence
 
 from ..db import Store
 from ..engines import Engine
-from ..probe.backend import Backend
+from ..probe.backend import Backend, BackendError
 from ..probe.model import BatchResult, Target
 from ..safety import Guard
 from ..scoring import StrategyScore, Thresholds
 from ..strategy import Strategy
+from .dnscheck import run_check
 
 
 @dataclass
@@ -37,6 +38,23 @@ class Variant:
     @property
     def text(self) -> str:
         return self.strategy.text if self.strategy else json.dumps(self.outbound, ensure_ascii=False)
+
+
+def _dns_check(backend: Backend, engine: Engine, variants: Sequence[Variant], rows: Sequence[Mapping[str, Any]],
+               targets: Sequence[Target], ips: Mapping[str, Sequence[str]], log: Callable[[str], None]) -> Dict[str, Any]:
+    working = [(r, v) for r, v in zip(rows, variants) if not r["error"]]
+    if not working:
+        return dict(backend.dns_info(), rows=[], error="")
+    best = max(working, key=lambda pair: (pair[0]["lb"], pair[0]["rate"]))[1]
+
+    def measure(ts: Sequence[Target], addresses: Mapping[str, Sequence[str]], reps: int) -> BatchResult:
+        if best.strategy is not None:
+            return backend.run_batch(engine, best.strategy.params, ts, addresses, reps=reps)
+        return backend.run_raw_outbound(best.outbound or {}, ts, addresses, reps=reps)
+    try:
+        return run_check(backend, measure, targets, ips, log)
+    except BackendError as e:
+        return dict(backend.dns_info(), rows=[], error=str(e))
 
 
 def compare(store: Store, backend: Backend, engine: Engine, variants: Sequence[Variant], targets: Sequence[Target],
@@ -108,5 +126,7 @@ def compare(store: Store, backend: Backend, engine: Engine, variants: Sequence[V
     summary = {"status": status, "simulated": sim, "rounds": rnd, "discarded_rounds": discarded, "rows": rows,
                "targets": [t.id for t in targets], "reps": reps, "network_id": network_id, "run_id": run_id,
                "engine_version": core}
+    summary["dns_check"] = (_dns_check(backend, engine, variants, rows, targets, ips, log) if status == "finished"
+                            else dict(backend.dns_info(), rows=[], error=""))
     store.finish_run(run_id, status, summary)
     return summary

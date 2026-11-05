@@ -48,13 +48,15 @@ end
 * `env` — архитектура, версия OpenWrt, путь и версия `tachyon-core`, ByeDPI, curl и поддержка HTTP/3,
   память, загрузка.
 * `resolve <host> [dns]` — адреса A/AAAA.
+* `live-dns` — описание основного DNS-сервера и его bootstrap из конфига живого ядра. Читаются только эти
+  два объекта, остальной конфиг с учётными данными прокси агент не выводит.
 * `caps` — для каждой строки `ключ<TAB>значение<TAB>конфиг` выполняет `tachyon-core check`:
   так определяется, какие параметры desync понимает **ваш** бинарник.
 * `stop` — убить временное ядро и снять блокировку.
 
 ## Переменные окружения
 
-`ADF_STATE`, `ADF_CORE`, `ADF_BYEDPI`, `ADF_MIN_MEM_KB`, `ADF_CURL`.
+`ADF_STATE`, `ADF_CORE`, `ADF_CORE_CONFIG`, `ADF_BYEDPI`, `ADF_MIN_MEM_KB`, `ADF_CURL`.
 
 ## Нагрузка
 
