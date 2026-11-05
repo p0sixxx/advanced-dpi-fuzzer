@@ -28,14 +28,44 @@ pytestmark = pytest.mark.skipif(not (shutil.which("curl") and shutil.which("open
 BODY = b"<html>hello-adf " + b"x" * 100_000 + b"</html>"
 
 
+CA_CONFIG = """[ca]
+default_ca = local
+
+[local]
+dir = {d}
+database = {d}/index.txt
+new_certs_dir = {d}
+serial = {d}/serial
+default_md = sha256
+policy = anything
+x509_extensions = names
+
+[anything]
+commonName = supplied
+
+[names]
+basicConstraints = critical,CA:TRUE
+subjectAltName = DNS:open.test,DNS:blocked.test,DNS:localhost
+"""
+
+
+def _certificate(d):
+    """Valid from long ago: under WSL the clock can step back, and a certificate that starts now is then not yet valid."""
+    key, csr, crt, config = d / "key.pem", d / "csr.pem", d / "crt.pem", d / "ca.cnf"
+    config.write_text(CA_CONFIG.format(d=d))
+    (d / "index.txt").write_text("")
+    (d / "serial").write_text("01\n")
+    subprocess.run(["openssl", "req", "-new", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key), "-out", str(csr),
+                    "-subj", "/CN=open.test"], check=True, capture_output=True)
+    subprocess.run(["openssl", "ca", "-batch", "-selfsign", "-notext", "-config", str(config), "-keyfile", str(key),
+                    "-in", str(csr), "-out", str(crt), "-startdate", "20200101000000Z", "-enddate", "20991231000000Z"],
+                   check=True, capture_output=True)
+    return key, crt
+
+
 @pytest.fixture(scope="module")
 def https_server(tmp_path_factory):
-    d = tmp_path_factory.mktemp("tls")
-    key, crt = d / "key.pem", d / "crt.pem"
-    subprocess.run(["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-keyout", str(key), "-out", str(crt),
-                    "-days", "2", "-subj", "/CN=open.test",
-                    "-addext", "subjectAltName=DNS:open.test,DNS:blocked.test,DNS:localhost"],
-                   check=True, capture_output=True)
+    key, crt = _certificate(tmp_path_factory.mktemp("tls"))
 
     class H(http.server.BaseHTTPRequestHandler):
         def do_GET(self):  # noqa: N802
