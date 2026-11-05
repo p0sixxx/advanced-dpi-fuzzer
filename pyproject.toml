@@ -7,6 +7,7 @@ name = "advanced-dpi-fuzzer"
 version = "0.3.1"
 description = "Adaptive search, measurement and optimisation of DPI desynchronization strategies (Tachyon Native Desync, ByeDPI; zapret/zapret2 grammar)"
 readme = "README.md"
+license = {text = "MIT"}
 requires-python = ">=3.11"
 dependencies = []
 
