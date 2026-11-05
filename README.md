@@ -5,8 +5,8 @@
 **zapret2 (nfqws2)**. Цель — найти не просто «какую-то работающую», а **самую простую стратегию,
 статистически надёжную на всех ваших ресурсах**, для конкретного провайдера и маршрута.
 
-> Статус: 0.1.0. Код, тесты и агент проверены в CI-окружении (Linux, `dash` и busybox `ash`) и
-> в реальных прогонах на GL.iNet Flint 2 (tachyon-core 0.3.4) — см. «Ограничения».
+> Статус: 0.3.1. Код, тесты и агент проверены в CI-окружении (Linux, `dash` и busybox `ash`) и
+> в реальных прогонах на GL.iNet Flint 2 (tachyon-core 0.3.4) — см. [ограничения](#ограничения).
 
 ## Чем отличается от встроенного DPI Fuzzer v2 Tachyon
 
@@ -165,7 +165,7 @@ Tachyon меняет только `adf apply`, и только после под
 
 ```sh
 python packaging/build_release.py
-ssh root@192.168.8.1 "cat > /tmp/adf-router.sh" < dist/adf-router-0.1.0.sh
+ssh root@192.168.8.1 "cat > /tmp/adf-router.sh" < dist/adf-router-0.3.1.sh
 ssh -t root@192.168.8.1 sh /tmp/adf-router.sh
 ```
 
@@ -238,7 +238,7 @@ Chrome. Adaptive 2.0 здесь не проходит `youtubei.googleapis.com`,
 границе интервала Уилсона худшей цели (`Working`: LB ≥ 0.50, n ≥ 5; `Stable`: LB ≥ 0.75, n ≥ 12;
 `Excellent`: LB ≥ 0.85, n ≥ 30 и p90 TTFB не хуже 1.5× эталона).
 
-## Ограничения (честно)
+## Ограничения
 
 * Публичные исходники tachyon-core старее бинарника; поддержка `fooling`, `multi_*`, `seqovl` и т. п.
   взята из CHANGELOG/UI Tachyon. `tachyon-core check` 0.3.4 проверяет имена ключей, но не значения,

@@ -31,7 +31,7 @@
 # ADF_CORE_CONFIG (config of the live core, read-only),
 # ADF_BYEDPI (ciadpi path), ADF_MIN_MEM_KB (24576), ADF_CURL (curl).
 
-ADF_AGENT_VERSION="0.1.0"
+ADF_AGENT_VERSION="0.3.1"
 ADF_STATE="${ADF_STATE:-/tmp/adf-agent}"
 ADF_MIN_MEM_KB="${ADF_MIN_MEM_KB:-24576}"
 ADF_CURL="${ADF_CURL:-curl}"

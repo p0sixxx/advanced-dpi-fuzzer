@@ -277,7 +277,7 @@ sys.exit(subprocess.run(["sh", "-c", remote], input=data).returncode)
     t = SSHTransport(host="192.0.2.1", ssh=str(fake), identity="~/.ssh/none", remote_agent=str(remote_agent))
     t.install(crlf)
     assert b"\r" not in remote_agent.read_bytes()
-    assert t.call(["version"]).strip() == "0.1.0"
+    assert t.call(["version"]).strip() == "0.3.1"
     assert "~" not in log.read_text()  # identity path expanded
     assert _sh.which("sh")
 
