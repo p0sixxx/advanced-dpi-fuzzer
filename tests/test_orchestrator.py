@@ -31,6 +31,17 @@ def test_search_finds_good_strategy():
     assert s["unique_tested"] < s["pool_size"]  # no exhaustive enumeration
 
 
+def test_named_strategy_is_measured_on_every_target():
+    store = Store(":memory:")
+    engine = TachyonDesync()
+    named = from_text(engine, "mode=fake_disorder split_pos=1 fake_ttl=10 repeats=4", origin="user")
+    orch = Orchestrator(store, SimulatedBackend(DPIModel(seed=7)), engine, DEFAULT_TARGETS[:4], DEFAULT_CONTROLS,
+                        SearchConfig(seed=7, network_id="isp"), guard(40), extra=[named])
+    orch.run()
+    measured = store.trials("isp", True, strategy_ids=[named.id])
+    assert {r["target_id"] for r in measured} >= {t.id for t in orch.active}
+
+
 def test_aborts_when_nothing_blocked():
     model = DPIModel(seed=1, rules={"*": lambda p: 0.99})
     orch = Orchestrator(Store(":memory:"), SimulatedBackend(model), TachyonDesync(), DEFAULT_TARGETS[:2],

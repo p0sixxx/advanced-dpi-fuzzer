@@ -533,7 +533,7 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--max-probes", type=int)
     sp.add_argument("--max-minutes", type=float)
     sp.add_argument("--seed", type=int, default=0)
-    sp.add_argument("--strategy", action="append", help="extra strategy to include (repeatable)")
+    sp.add_argument("--strategy", action="append", help="strategy to measure first (repeatable)")
     sp.add_argument("--fresh", action="store_true", help="ignore stored history")
     sp.add_argument("--force", action="store_true", help="search even if nothing is blocked")
     sp.add_argument("--report", help="write the Markdown report here")

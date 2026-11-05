@@ -435,7 +435,18 @@ class Orchestrator:
         self._maybe_control(force=no_ok and had_success_before)
         return batch
 
+    def _measure_extra(self) -> None:
+        """Strategies named by the user are measured first: in a pool of hundreds their turn may never come."""
+        for s in self.extra:
+            c = self.pool.get(s.id)
+            if c is None or c.invalid:
+                continue
+            self.guard.check()
+            self._run_candidate(c, SEARCH, stop_on_fail=False)
+            self._after(c)
+
     def _search(self) -> None:
+        self._measure_extra()
         explore_round = 0
         while self.guard.fraction_used() < self.cfg.search_until:
             self.guard.check()
