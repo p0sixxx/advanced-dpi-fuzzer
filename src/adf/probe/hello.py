@@ -41,6 +41,15 @@ class ProxyFailure(Exception):
     """The engine's proxy did not open the connection: says nothing about the strategy."""
 
 
+class TargetUnreachable(Exception):
+    """The engine works, but it could not connect to the target."""
+
+
+# SOCKS5 replies from an engine that tried to connect: general failure, network unreachable,
+# host unreachable, connection refused, TTL expired. The rest mean the request itself was refused.
+CONNECT_FAILED_REPLIES = frozenset({1, 3, 4, 5, 6})
+
+
 def _u16(v: int) -> bytes:
     return struct.pack(">H", v)
 
@@ -145,6 +154,8 @@ def socks5_open(stream: Stream, host: str, port: int, timeout: float = PROXY_TIM
             address = b"\x03" + _vec8(host.encode("idna"))
         stream.send(b"\x05\x01\x00" + address + _u16(port))
         head = read_exact(stream, 4, timeout)
+        if len(head) == 4 and head[1] in CONNECT_FAILED_REPLIES:
+            raise TargetUnreachable(f"the engine could not connect to the target: {head.hex()}")
         if len(head) < 4 or head[1] != 0:
             raise ProxyFailure(f"the proxy refused the connection: {head.hex()}")
         rest = {1: 4, 4: 16}.get(head[3])

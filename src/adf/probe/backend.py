@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence
 from ..engines import ByeDPI, Engine, TachyonDesync
 from ..engines.tachyon_desync import FAKE_MODES
 from .dns import A, AAAA, AUTO, FALLBACK_SERVER, ask, check_server, describe, resolver_config
-from .hello import PROXY_TIMEOUT_S, ProxyFailure, Stream, client_hello, exchange, socks5_open
+from .hello import PROXY_TIMEOUT_S, ProxyFailure, Stream, TargetUnreachable, client_hello, exchange, socks5_open
 from .model import LARGE_HELLO, BatchResult, ProbeResult, Target, classify
 
 AGENT_PATH = Path(os.environ.get("ADF_AGENT_PATH") or Path(__file__).resolve().parents[3] / "agent" / "adf-agent.sh")
@@ -517,6 +517,8 @@ class AgentBackend(Backend):
             result.verdict, result.tls_ms, result.error = exchange(stream, client_hello(t.host), s.connect_timeout_s)
             result.ttfb_ms = result.total_ms = result.tls_ms
             result.http_code = 200 if result.ok else 0
+        except TargetUnreachable as e:
+            result.verdict, result.error = "connect_failed", str(e)[:300]
         except ProxyFailure as e:
             result.error = str(e)[:300]
         finally:

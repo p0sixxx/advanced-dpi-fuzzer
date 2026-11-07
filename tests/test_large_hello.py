@@ -16,8 +16,8 @@ from adf.config import load_config
 from adf.db import Store
 from adf.engines import TachyonDesync
 from adf.probe.backend import AgentBackend, BackendError, LocalTransport, ProbeSettings, SimulatedBackend, SSHTransport
-from adf.probe.hello import (HELLO_BYTES, MLKEM768_Q, ProxyFailure, X25519_MLKEM768, client_hello, exchange,
-                             mlkem768_public_key, socks5_open)
+from adf.probe.hello import (HELLO_BYTES, MLKEM768_Q, ProxyFailure, TargetUnreachable, X25519_MLKEM768, client_hello,
+                             exchange, mlkem768_public_key, socks5_open)
 from adf.probe.model import LARGE_HELLO, BatchResult, Target
 from adf.probe.targets import DEFAULT_TARGETS, with_large_hello
 from adf.report import compare_report
@@ -137,11 +137,17 @@ def test_exchange_verdicts(replies, error, verdict):
 
 
 def test_socks_failures_are_proxy_failures():
-    for replies in ([], [b"\x05\xff"], [b"\x05\x00", b"\x05\x05\x00\x01"]):
+    for replies in ([], [b"\x05\xff"], [b"\x05\x00", b"\x05\x02\x00\x01"]):
         with pytest.raises(ProxyFailure):
             socks5_open(Scripted(replies), "192.0.2.1", 443, timeout=1)
     with pytest.raises(ProxyFailure):
         socks5_open(Scripted(error=TimeoutError()), "192.0.2.1", 443, timeout=1)
+
+
+@pytest.mark.parametrize("reply", [1, 3, 4, 5, 6])
+def test_socks_connect_errors_blame_the_target(reply):
+    with pytest.raises(TargetUnreachable):
+        socks5_open(Scripted([b"\x05\x00", bytes([5, reply, 0, 1])]), "192.0.2.1", 443, timeout=1)
 
 
 def test_socks_request_for_ip_and_name():
@@ -311,6 +317,19 @@ def test_unreachable_engine_stops_the_run_with_a_clear_message():
     t = Target("x-large", "https://a.example/", "test", kind=LARGE_HELLO)
     with pytest.raises(BackendError, match="large_hello = false"):
         be.run_batch(TachyonDesync(), {"mode": "split"}, [t], {"x-large": ["192.0.2.1"]}, reps=1)
+
+
+class EngineWithoutRoute(NoForwarding):
+    def connect(self, host, port, timeout):
+        return Scripted([b"\x05\x00", b"\x05\x01\x00\x01"])
+
+
+def test_target_the_engine_cannot_reach_does_not_stop_the_run():
+    be = AgentBackend(EngineWithoutRoute(), ProbeSettings(interval_ms=0))
+    t = Target("x-large", "https://a.example/", "test", kind=LARGE_HELLO)
+    batch = be.run_batch(TachyonDesync(), {"mode": "split"}, [t], {"x-large": ["192.0.2.1"]}, reps=1)
+    assert [r.verdict for r in batch.results] == ["connect_failed"]
+    assert not batch.results[0].counts
 
 
 def test_ssh_stream_carries_a_hello_through_ssh_w(tmp_path, tls_server):
