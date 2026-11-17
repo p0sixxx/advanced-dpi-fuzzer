@@ -66,6 +66,7 @@ class SearchConfig:
     complexity_lambda: float = 0.01
     promising_rate: float = 0.6
     beam_width: int = 4             # only the best few strategies spawn mutations
+    warmup_per_family: int = 3      # every technique family gets this many screening probes first
     mutations_per_expand: int = 24
     max_pool: int = 1500
     search_until: float = 0.60      # fraction of budget for the search phase
@@ -145,6 +146,7 @@ class Orchestrator:
         self.verdicts: Dict[str, int] = {}
         self.finalists: List[Candidate] = []
         self.final_scores: Dict[str, StrategyScore] = {}
+        self.history_ids: set = set()
         self.drift: Dict[str, Any] = {}
 
     # ================================================================ helpers
@@ -370,6 +372,8 @@ class Orchestrator:
             for sid, sc in sorted(hist.items(), key=lambda kv: -kv[1].utility())[:30]:
                 if sc.rate > 0 and sid not in invalid:
                     self._add_strategy(Strategy(**{**known[sid].__dict__, "origin": "history"}))
+                    # a former winner may already be in the pool as a seed: track it by evidence, not label
+                    self.history_ids.add(sid)
         for params in pairwise(self.engine, self.caps, seed=self.cfg.seed):
             self._add(params, "pairwise")
         for sid, reason in invalid.items():
@@ -422,11 +426,50 @@ class Orchestrator:
         """Worst required target posterior mean under a uniform prior."""
         return min(((t.k + 1) / (t.n + 2) for t in sc.required), default=0.0)
 
+    @staticmethod
+    def _family(c: Candidate) -> str:
+        p = c.strategy.params
+        return str(p.get("mode", p.get("split", p.get("method", ""))))
+
     def _in_beam(self, c: Candidate) -> bool:
-        ranked = sorted((self._posterior_mean(sc), sid) for sid, sc in self.scores.items()
-                        if sid in self.pool and not self.pool[sid].invalid and sc.n_total > 0)
-        top = {sid for _, sid in ranked[-self.cfg.beam_width:]}
-        return c.id in top
+        """Diverse beam: the best strategy of each family, then the top ``beam_width`` of those.
+
+        Without the per-family step the beam fills with one family's variants as soon as it
+        works on the easy targets, and other techniques are never refined.
+        """
+        best_per_family: Dict[str, Tuple[float, str]] = {}
+        for sid, sc in self.scores.items():
+            cand = self.pool.get(sid)
+            if cand is None or cand.invalid or sc.n_total <= 0:
+                continue
+            fam = self._family(cand)
+            pm = self._posterior_mean(sc)
+            if fam not in best_per_family or pm > best_per_family[fam][0]:
+                best_per_family[fam] = (pm, sid)
+        top = sorted(best_per_family.values(), reverse=True)[: self.cfg.beam_width]
+        return c.id in {sid for _, sid in top}
+
+    def _warmup(self) -> None:
+        """Stratified screening: each family's most promising candidates get probed first."""
+        by_family: Dict[str, List[Candidate]] = {}
+        for c in self.pool.values():
+            if not c.invalid:
+                by_family.setdefault(self._family(c), []).append(c)
+        self._refit()
+        for fam, cands in sorted(by_family.items()):
+            tested = sum(1 for c in cands if self.scores.get(c.id) and self.scores[c.id].n_total > 0)
+            order = sorted(cands, key=lambda c: (c.origin not in ("seed", "history", "import", "tachyon_v2", "user"),
+                                                 -self.surrogate.predict(c.strategy.params)))
+            for c in order:
+                if tested >= self.cfg.warmup_per_family or self.guard.fraction_used() >= self.cfg.search_until:
+                    break
+                sc = self.scores.get(c.id)
+                if sc is not None and sc.n_total > 0:
+                    continue
+                self._run_candidate(c, SEARCH, stop_on_fail=self.cfg.stop_on_fail_screening)
+                self._after(c)
+                tested += 1
+        self._event("warmup_done", families=len(by_family))
 
     def _after(self, c: Candidate) -> None:
         sc = self.scores.get(c.id)
@@ -476,7 +519,8 @@ class Orchestrator:
             self._after(c)
 
     def _search(self) -> None:
-        self._measure_extra()
+        self._measure_extra()   # named strategies (user / current Tachyon / Fuzzer v2) first
+        self._warmup()          # then every technique family gets a few screening probes
         explore_round = 0
         while self.guard.fraction_used() < self.cfg.search_until:
             self.guard.check()
@@ -558,7 +602,7 @@ class Orchestrator:
 
     def _revalidate(self) -> None:
         """Re-test previous winners with a fixed number of trials and detect drift early."""
-        hist = [c for c in self.pool.values() if c.origin == "history" and not c.invalid]
+        hist = [c for c in self.pool.values() if c.id in self.history_ids and not c.invalid]
         hist.sort(key=lambda c: -self._score(c.id).utility())
         tested = 0
         for c in hist[: self.cfg.revalidate_top]:

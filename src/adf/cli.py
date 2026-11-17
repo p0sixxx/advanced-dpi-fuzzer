@@ -20,6 +20,7 @@ from .engines.tachyon_desync import caps_test_matrix, capabilities_from_probe
 from .generator import pairwise
 from .integrations import tachyon as tachyon_int
 from .integrations import tachyon_history
+from .integrations import tachyon_check
 from .learning import DecayPolicy, build_scores
 from .probe.backend import (AgentBackend, Backend, BackendError, DPIModel, LocalTransport, ProbeSettings,
                             SimulatedBackend, SSHTransport)
@@ -125,16 +126,19 @@ def cmd_caps(args: argparse.Namespace) -> int:
     store = Store(cfg.db)
     store.save_capabilities(TachyonDesync.name, data["host"], data)
     caps = capabilities_from_probe(data)
-    real = [r for r in res if not r.get("control")]
+    real = [r for r in res if not r.get("control") and not r.get("informational")]
     controls = [r for r in res if r.get("control")]
+    info = [r for r in res if r.get("informational")]
     print(json.dumps({
         "version": data["version"],
         "accepted": sum(1 for r in real if r.get("ok")), "tested": len(real),
         "rejected": [f"{r['key']}={r['value']}" for r in real if not r.get("ok")],
         "invalid_values_correctly_rejected": sum(1 for r in controls if not r.get("ok")),
         "invalid_values_accepted": [f"{r['key']}={r['value']}" for r in controls if r.get("ok")],
+        "core_only_features": {f"{r['key']}={json.dumps(r['value'], ensure_ascii=False)}": r.get("ok") for r in info},
         "note": ("keys listed in capabilities.extra.unverifiable_by_check are not validated by "
-                 "`tachyon-core check`; their support is judged by measurements, not by check"),
+                 "`tachyon-core check`; their support is judged by measurements, not by check. "
+                 "core_only_features: accepted by the core but not expressible through Tachyon UCI"),
         "capabilities": caps.to_dict()}, ensure_ascii=False, indent=2))
     return 0
 
@@ -427,6 +431,20 @@ def cmd_tachyon_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tachyon_check(args: argparse.Namespace) -> int:
+    cfg = _cfg(args)
+    if args.file:
+        text = Path(args.file).read_text(encoding="utf-8")
+    else:
+        text = _transport(cfg, args).shell(tachyon_check.CHECK_CMD)
+    if args.save_raw:
+        Path(args.save_raw).write_text(text, encoding="utf-8")
+    rename = args.rename.split("=>", 1) if args.rename else None
+    res = tachyon_check.analyze(text, backup=args.backup or [], rename=rename)
+    print(tachyon_check.report(res))
+    return 1 if any(f.level == "error" for f in res.findings) else 0
+
+
 def cmd_bench(args: argparse.Namespace) -> int:
     seeds = [int(x) for x in args.seeds.split(",")]
     print(bench_table(bench(seeds, n_targets=args.targets_n)))
@@ -630,6 +648,15 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--file", help="local copy of /etc/tachyon/fuzzer_history.json (or adf-info.txt)")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_tachyon_history)
+
+    sp = sub.add_parser("tachyon-check", help="read-only check of Tachyon desync sections and balancers")
+    where(sp, simulate=False)
+    sp.add_argument("--backup", action="append", metavar="NAME",
+                    help="connection that must only be the last (fallback) balancer tier (repeatable)")
+    sp.add_argument("--rename", metavar="OLD=>NEW", help="show every place the old connection name is used")
+    sp.add_argument("--file", help="analyse saved output instead of connecting")
+    sp.add_argument("--save-raw", help="also save the raw router output (no keys are collected)")
+    sp.set_defaults(func=cmd_tachyon_check)
 
     sp = sub.add_parser("bench", help="offline algorithm comparison on the DPI simulator")
     sp.add_argument("--seeds", default="1,2,3,4,5")

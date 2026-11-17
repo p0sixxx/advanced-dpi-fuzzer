@@ -58,8 +58,10 @@ MODE_SIMPLER = {
     "oob": ("split",),
 }
 
+# tachyon-core reference (docs/reference/outbounds/desync.md, 0.5.9): fooling defaults to
+# "md5" when absent. Tachyon's UCI translator drops "none", so through Tachyon a fake is
+# never sent without fooling: "md5" is the neutral (baseline) value, not "off".
 FOOLINGS = (
-    "",
     "md5",
     "badsum",
     "badseq",
@@ -71,7 +73,7 @@ FOOLINGS = (
     "badseq_badack_badsum",
     "hopbyhop",
 )
-FOOLING_COST = {"": 0.0, "md5_badack": 2.0, "badseq_badack_badsum": 3.0}
+FOOLING_COST = {"md5": 0.0, "md5_badack": 2.0, "badseq_badack_badsum": 3.0}
 
 # Position markers understood by connections.uc norm_single_split_pos (plus ints).
 POS_MARKERS = ("midsld", "midsld-2", "midsld+2", "sni", "sniext+1", "host+1", "endhost-1", "extlen")
@@ -92,6 +94,7 @@ MULTI_POSITIONS: Tuple[str, ...] = (
 WHITELIST_SNI = (
     "", "www.google.com", "ya.ru", "vk.com", "max.ru", "gosuslugi.ru", "sberbank.ru", "tbank.ru", "ozon.ru",
     "wildberries.ru", "rutube.ru", "dzen.ru", "avito.ru", "rzd.ru", "pochta.ru", "2gis.ru", "mail.ru", "rndsni",
+    "padencap",  # Tachyon 1.8.0: exact-length TLS padding encapsulation of the decoy
 )
 
 # Aliases accepted by tachyon connections.uc (norm_mode / norm_fooling / norm_single_split_pos)
@@ -104,7 +107,8 @@ _MODE_ALIASES = {
     "tls_rec": "tlsrec",
 }
 _FOOLING_ALIASES = {
-    "none": "", "tcp_md5": "md5", "wrong-md5": "md5", "wrong_md5": "md5",
+    "": "md5", "none": "md5",  # absent / "none" = core default md5 (Tachyon drops "none")
+    "tcp_md5": "md5", "wrong-md5": "md5", "wrong_md5": "md5", "md5sig": "md5", "tcp_md5sig": "md5",
     "ts": "timestamp", "tcp_ts": "timestamp", "wrong-timestamp": "timestamp", "wrong_timestamp": "timestamp",
     "seq": "badseq", "wrong-sequence": "badseq", "wrong_sequence": "badseq",
     "ack": "badack", "tcp_ack": "badack", "wrong-ack": "badack", "wrong_ack": "badack",
@@ -130,11 +134,11 @@ INT_KEYS = frozenset({"fake_ttl", "repeats", "split_delay_ms", "seqovl", "wsize"
 UDP_KEYS = frozenset({"udp_fake", "udp_repeats", "udp_fake_ttl", "udplen"})
 # Keys whose "off" value is the engine default and is left out of rendered output.
 # fake_ttl / repeats / split_delay_ms are always explicit: core and UI defaults differ.
-OMIT_WHEN_OFF = frozenset({"fooling", "fake_sni", "seqovl", "syndata", "wsize", "ipfrag", "tlsrec_first", "udplen"})
+OMIT_WHEN_OFF = frozenset({"fake_sni", "seqovl", "syndata", "wsize", "ipfrag", "tlsrec_first", "udplen"})
 
 # tachyon-core values for keys a strategy string leaves out (public source config.rs ``Default``).
 # A missing key is *not* "off": the core applies these. ADF's own strings always state them.
-CORE_DEFAULTS = {"split_pos": "midsld", "fake_ttl": 6, "repeats": 1, "split_delay_ms": 1}
+CORE_DEFAULTS = {"split_pos": "midsld", "fooling": "md5", "fake_ttl": 6, "repeats": 1, "split_delay_ms": 1}
 
 PROFILE_PUBLIC_SOURCE = "tachyon-core-public-source"
 PROFILE_BINARY_03 = "tachyon-core-0.3"
@@ -198,7 +202,7 @@ class TachyonDesync(Engine):
                    cost=lambda v: MODE_COST.get(v, 3.0)),
             Factor("split_pos", filter_values(positions, caps, "split_pos"), "midsld", "split position(s)",
                    applies=splits, cost=lambda v: 0.75 * (pos_count(str(v)) - 1)),
-            Factor("fooling", filter_values(foolings, caps, "fooling"), "", "fake packet fooling",
+            Factor("fooling", filter_values(foolings, caps, "fooling"), "md5", "fake packet fooling",
                    applies=fake, cost=lambda v: FOOLING_COST.get(v, 1.0)),
             Factor("fake_ttl", filter_values((2, 3, 4, 5, 6, 7, 8, 10, 12), caps, "fake_ttl"), 6, "fake TTL",
                    applies=fake, ordered=True),
@@ -298,6 +302,10 @@ class TachyonDesync(Engine):
             return "split_delay_ms outside 0..1000"
         # Assumption (zapret semantics): disorder variants need seqovl < first split position.
         seqovl = int(params.get("seqovl", 0) or 0)
+        if not 0 <= seqovl <= 256:
+            return "seqovl outside 0..256 (tachyon-core reference)"
+        if not 0 <= int(params.get("udplen", 0) or 0) <= 256:
+            return "udplen outside 0..256 (tachyon-core reference)"
         if seqovl and pos is not None and "disorder" in str(mode):
             first = _first_numeric_pos(pos)
             if first is not None and seqovl >= first:
@@ -496,8 +504,8 @@ def capabilities_from_probe(data: Mapping[str, Any]) -> Capabilities:
     unknown_keys_accepted = any(item.get("control") and item.get("ok") and item["key"] == "adf_unknown_key"
                                 for item in data.get("results", []))
     for item in data.get("results", []):
-        if item.get("control"):
-            continue
+        if item.get("control") or item.get("informational") or item.get("key") not in KEY_ORDER:
+            continue  # only factors ADF searches shape the capabilities
         key, value, ok = item["key"], item["value"], bool(item["ok"])
         if key == "split_pos":
             try:
@@ -559,9 +567,10 @@ def caps_test_matrix() -> List[Dict[str, Any]]:
     for p in SINGLE_POSITIONS:
         add("split_pos", int(p) if p.isdigit() else p)
     add("split_pos", [1, "midsld"], {"mode": "multi_split"})
-    for f in FOOLINGS[1:]:
+    for f in FOOLINGS:
         add("fooling", f, {"mode": "fake_split"})
     add("fake_sni", "rndsni", {"mode": "fake_split"})
+    add("fake_sni", "padencap", {"mode": "fake_split"})
     for key, value in (("seqovl", 1), ("syndata", True), ("wsize", 1), ("ipfrag", True),
                        ("tlsrec_first", True), ("udplen", 4), ("auto_tune", False)):
         add(key, value)
@@ -574,6 +583,15 @@ def caps_test_matrix() -> List[Dict[str, Any]]:
                               ("udplen", "x", None)):
         add(key, value, extra)
         tests[-1]["control"] = True
+    # Informational: accepted by tachyon-core 0.5.x per its reference, but Tachyon's UCI
+    # translator cannot pass them (or renames them), so ADF never searches or exports them.
+    for key, value, extra in (("fooling", "ts", {"mode": "fake_split"}), ("fooling", "none", {"mode": "fake_split"}),
+                              ("mode", "disoob", None), ("mode", "tlsspoof", None),
+                              ("split_pos", "sni_ext+1", None), ("host_fake", True, None), ("wscale", 2, None),
+                              ("sni_pool", ["ya.ru", "vk.com"], {"mode": "fake_split"}),
+                              ("fake_payload", "0x160301", {"mode": "fake_split"}), ("quic_desync", False, None)):
+        add(key, value, extra)
+        tests[-1]["informational"] = True
     return tests
 
 

@@ -155,7 +155,7 @@ class ImportedSection:
     section: str
     kind: str                       # "fixed" | "adaptive"
     params: Optional[Dict[str, Any]]  # measurable TCP strategy (None: adaptive or not expressible)
-    auto_tune: Optional[bool]
+    auto_tune: Optional[bool]       # as passed to the core (None = not passed)
     outbound: Dict[str, Any] = field(default_factory=dict)  # exact object Tachyon passes to tachyon-core
     ignored_opts: str = ""          # desync_opts present but ignored by Tachyon
     notes: List[str] = field(default_factory=list)
@@ -208,9 +208,11 @@ def section_outbound(opts: Mapping[str, Any], engine: Optional[TachyonDesync] = 
         ob["fooling"] = fooling
     if str(opts.get("desync_auto_tune", "")).strip() != "":
         ob["auto_tune"] = _bool(opts["desync_auto_tune"])
+    elif raw_preset in ("discord", "youtube", "google_youtube", "general"):
+        ob["auto_tune"] = True  # Tachyon >= 1.8.0 connections.uc
     if _bool(opts.get("desync_tlsrec_first", "0")):
         ob["tlsrec_first"] = True
-    if raw_preset == "discord" and not _bool(opts.get("desync_udp_fake", "0")):
+    if raw_preset == "discord" and str(opts.get("desync_udp_fake", "")).strip() == "":
         ob["udp_fake"] = True
     if "preset" not in ob and "mode" not in ob:
         ob["preset"] = "auto"
@@ -276,6 +278,9 @@ def section_to_params(sid: str, opts: Mapping[str, Any], engine: Optional[Tachyo
         params.setdefault(k, v)
     if auto_tune:
         notes.append("auto_tune=1: tachyon-core may switch away from these parameters at runtime")
+    elif auto_tune is None:
+        notes.append("auto_tune not set: tachyon-core >= 0.5 enables it by default on real connections, so "
+                     "these parameters are only a starting point (set desync_auto_tune=0 to pin them)")
     try:
         canon = tcp_engine.canonicalize(params)
         reason = tcp_engine.check(canon)

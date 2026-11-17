@@ -29,35 +29,80 @@ from .safety import Budget, Guard, SafetyPolicy
 from .search.orchestrator import Orchestrator, SearchConfig
 
 
-def tachyon_v2_candidates(engine: TachyonDesync) -> List[Tuple[str, Dict[str, Any]]]:
-    """Candidate list with the structure of Tachyon's generate_combinatorial_desync()."""
-    out: List[Tuple[str, Dict[str, Any]]] = []
+# generate_combinatorial_desync() grids per Tachyon release (diagnostics/fuzzer/strategies.uc)
+_V2_GRIDS = {
+    "1.7": {"modes": ("fake_split", "tlsrec", "disorder", "split", "fake", "oob"),
+            "splits": ("1", "2", "midsld", "sni"), "ttls": (3, 4, 5, 6, 8),
+            "snis": ("www.google.com", "max.ru", "gosuslugi.ru", "sberbank.ru"), "udp_twin": False},
+    "1.8.0": {"modes": ("fake_split", "fake_disorder", "multi_disorder", "multi_split", "tlsrec", "disorder",
+                        "split", "fake", "oob"),
+              "splits": ("midsld", "sni", "sniext+1", "host+1", "midsld-2", "endhost-1", "1", "2"),
+              "ttls": (3, 4, 5, 6, 8),
+              "snis": ("www.google.com", "max.ru", "vk.com", "gosuslugi.ru", "rzd.ru", "ozon.ru", "padencap",
+                       "rndsni"),
+              "udp_twin": True},
+}
+# Stage 1 runs until TACHYON_JOB_HARD_DEADLINE_SECONDS (2700 s). The user's history shows
+# ~3.8 s per candidate (276 candidates in ~1050 s), i.e. about 710 candidates per job.
+V2_DEADLINE_CANDIDATES = 710
+
+
+def _v2_rerank_drop(items: List[Tuple[str, str, Dict[str, Any]]]) -> List[Tuple[str, str, Dict[str, Any]]]:
+    """Tachyon's rerank_strategies_by_dpi() for dpi type "drop": keyword score + its swap sort."""
+    keys = ("syndata", "multisplit", "multidisorder", "paws", "seqovl", "fake", "badseq", "disorder")
+    scored = [[sum(10 for k in keys if k in args.lower() or k in name.lower()), (name, args, p)]
+              for name, args, p in items]
+    n = len(scored)
+    for i in range(n - 1):  # same O(n^2) exchange sort (not stable), to reproduce the order
+        for j in range(i + 1, n):
+            if scored[j][0] > scored[i][0]:
+                scored[i], scored[j] = scored[j], scored[i]
+    return [item for _, item in scored]
+
+
+def tachyon_v2_candidates(engine: TachyonDesync, version: str = "1.8.0",
+                          rerank_drop: bool = False) -> List[Tuple[str, Dict[str, Any]]]:
+    """Candidate list with the structure of Tachyon's generate_combinatorial_desync().
+
+    Entries that differ only in parameters a TCP probe cannot see (UDP twins in 1.8.0,
+    TTL/SNI for disorder, split position for fake) are kept: Tachyon spends a probe on each.
+    """
+    g = _V2_GRIDS[version]
+    items: List[Tuple[str, str, Dict[str, Any]]] = []
     seen_args = set()
 
-    def add(name: str, args: str) -> None:
+    def add(name: str, args: str, tcp_args: Optional[str] = None) -> None:
         if args in seen_args:  # Tachyon dedups by argument *string* only
             return
         seen_args.add(args)
         try:
-            params = engine.canonicalize(engine.parse(args))
+            params = engine.canonicalize(engine.parse(tcp_args or args))
         except StrategyError:
             return  # Tachyon's validator would drop it as well
-        out.append((name, params))
+        items.append((name, args, params))
 
     for name, p in engine.seeds():
         add(name, engine.render(p))
-    modes = ("fake_split", "tlsrec", "disorder", "split", "fake", "oob")
-    for mode in modes:
-        for pos in ("1", "2", "midsld", "sni"):
-            if "fake" in mode or mode == "disorder":
-                for ttl in (3, 4, 5, 6, 8):
-                    for sni in ("www.google.com", "max.ru", "gosuslugi.ru", "sberbank.ru"):
-                        add(f"{mode} {pos} {ttl} {sni}",
-                            f"mode={mode} split_pos={pos} fake_ttl={ttl} fake_sni={sni} repeats=6")
+    for mode in g["modes"]:
+        for pos in g["splits"]:
+            if mode in ("multi_split", "multi_disorder") and "," not in pos:
+                pos_eff = f"1,{pos}" if pos != "1" else "1,midsld"
             else:
-                add(f"{mode} {pos}", f"mode={mode} split_pos={pos}")
-                add(f"{mode} {pos} 2ms", f"mode={mode} split_pos={pos} split_delay_ms=2")
-    return out
+                pos_eff = pos
+            if "fake" in mode or mode == "disorder":
+                for ttl in g["ttls"]:
+                    for sni in g["snis"]:
+                        base = f"mode={mode} split_pos={pos_eff} fake_ttl={ttl} fake_sni={sni} repeats=6"
+                        add(f"{mode} (pos={pos}, TTL={ttl}, sni={sni})", base)
+                        if g["udp_twin"]:
+                            add(f"{mode} + UDP Fake (pos={pos}, TTL={ttl}, sni={sni}, udplen=64)",
+                                base + f" udp_fake=true udp_repeats=6 udp_fake_ttl={ttl} udplen=64", base)
+            else:
+                add(f"{mode} (pos={pos})", f"mode={mode} split_pos={pos_eff}")
+                add(f"{mode} (pos={pos}, delay=2ms)", f"mode={mode} split_pos={pos_eff} split_delay_ms=2")
+    if rerank_drop:
+        items = _v2_rerank_drop(items)
+    return [(name, params) for name, _, params in items]
 
 
 def _tachyon_score(results, ref: float = 0.0) -> float:
@@ -69,8 +114,9 @@ def _tachyon_score(results, ref: float = 0.0) -> float:
 
 
 def run_tachyon_v2(backend: SimulatedBackend, engine: TachyonDesync, targets: Sequence[Target],
-                   ips: Mapping[str, Sequence[str]]) -> Dict[str, Any]:
-    cands = tachyon_v2_candidates(engine)
+                   ips: Mapping[str, Sequence[str]], version: str = "1.8.0") -> Dict[str, Any]:
+    all_cands = tachyon_v2_candidates(engine, version, rerank_drop=True)
+    cands = all_cands[:V2_DEADLINE_CANDIDATES]
     required = [t for t in targets if t.required]
     probes0 = backend.probes
     stage1 = []
@@ -94,8 +140,9 @@ def run_tachyon_v2(backend: SimulatedBackend, engine: TachyonDesync, targets: Se
                                  * 0.3) + 50
         if reps_ok and score > best_score:
             best, best_score = (name, params), score
-    return {"algorithm": "tachyon_v2_emulation", "candidates": len(cands),
-            "unique_candidates": len({repr(sorted(p.items())) for _, p in cands}),
+    return {"algorithm": "tachyon_v2_emulation", "version": version, "candidates": len(all_cands),
+            "tested_before_deadline": len(cands),
+            "unique_candidates": len({repr(sorted(p.items())) for _, p in all_cands}),
             "probes": backend.probes - probes0, "selected": best[1] if best else None}
 
 

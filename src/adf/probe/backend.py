@@ -564,6 +564,7 @@ class AgentBackend(Backend):
             except (TypeError, json.JSONDecodeError):
                 pass
             item["control"] = bool(test.get("control"))
+            item["informational"] = bool(test.get("informational"))
             res.append(item)
         return res
 
@@ -699,4 +700,4 @@ class SimulatedBackend(Backend):
 
     def capabilities(self, tests: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
         return [{"t": "caps", "key": t["key"], "value": t["value"], "ok": not t.get("control"), "error": "",
-                 "control": bool(t.get("control"))} for t in tests]
+                 "control": bool(t.get("control")), "informational": bool(t.get("informational"))} for t in tests]

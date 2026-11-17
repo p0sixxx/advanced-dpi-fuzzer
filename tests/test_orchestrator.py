@@ -107,7 +107,7 @@ def test_history_is_reused_and_drift_detected():
     o2 = Orchestrator(store, SimulatedBackend(broken), TachyonDesync(), targets, DEFAULT_CONTROLS,
                       SearchConfig(seed=5, network_id="isp"), guard(150))
     s2 = o2.run()
-    assert any(c.origin == "history" for c in o2.pool.values())
+    assert o2.history_ids and any(c.id in o2.history_ids for c in o2.pool.values())
     assert s2.get("drift", {}).get("drifted"), s2.get("drift")
     assert store.current_epoch("isp") == 1
 
