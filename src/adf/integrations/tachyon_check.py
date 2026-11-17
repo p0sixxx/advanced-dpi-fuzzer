@@ -11,6 +11,7 @@ and the tachyon-core 0.5.9 reference (``docs/reference/outbounds/desync.md``).
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Mapping, Optional, Sequence
@@ -21,7 +22,7 @@ _KEYS = ("name", "label", "enabled", "action", "source_type", "balancer_type", "
          "outbound_group_levels", "group_refs", "source_refs", "include_outbounds", "exclude_outbounds",
          "include_regex", "exclude_regex", "include_prefixes", "balancer_refs", "outbound_group_refs",
          "outbound_source_refs", "testing_url", "active_check_interval", "urltest_active_check_interval",
-         "tolerance")
+         "tolerance", "balancer_settings")
 _TYPES = ("section", "outbound_source", "outbound_group", "balancer", "priority_group", "priority_level")
 UCI_FILTER = (r"^tachyon\.[^.=]+=(" + "|".join(_TYPES) + r")$|"
               r"^tachyon\.[^.=]+\.(" + "|".join(_KEYS) + r"|desync_[a-z0-9_]+)=")
@@ -71,6 +72,7 @@ class BalancerView:
     raw_levels: List[str]
     used_by: List[str]
     mode: str = ""
+    order_from: str = ""        # where the order was taken from
 
 
 @dataclass
@@ -125,6 +127,90 @@ def _display(cfg: Mapping[str, Mapping[str, Any]], ref: str) -> str:
     return str(sec.get("name") or sec.get("label") or ref)
 
 
+def _enabled(sec: Mapping[str, Any]) -> bool:
+    return str(sec.get("enabled", "1")) != "0"
+
+
+def _levels_of(entity: Mapping[str, Any]) -> List[str]:
+    """connections.uc ``extract_entity_priority_level_refs``."""
+    return _list(entity.get("outbound_group_levels"))
+
+
+def _balancer_settings(section: Mapping[str, Any], bid: str) -> Dict[str, Any]:
+    """connections.uc ``item_settings(section, "balancer_settings", bid)``: a JSON map per balancer."""
+    raw = section.get("balancer_settings")
+    if isinstance(raw, list):
+        raw = " ".join(raw)
+    try:
+        data = json.loads(raw) if raw else {}
+    except ValueError:
+        return {}
+    item = data.get(bid) if isinstance(data, dict) else None
+    return item if isinstance(item, dict) else {}
+
+
+def _effective_sources(cfg: Mapping[str, Mapping[str, Any]], sid: str, inline_sections: Sequence[str]) -> List[str]:
+    """Outbound sources of a section in Tachyon 1.8.0 order (``section_effective_outbound_sources``):
+    the section's own ``outbound_source_refs``, then its groups, then each balancer's
+    ``source_refs``/``group_refs`` and explicit level refs. A priority balancer without levels
+    gets its members in this order. Prefix-filtered balancers are not modelled."""
+    section = cfg.get(sid, {})
+    result: List[str] = []
+
+    def is_src(ref: str) -> bool:
+        return cfg.get(ref, {}).get(".type") == "outbound_source"
+
+    def add_src(ref: str) -> None:
+        if is_src(ref) and _enabled(cfg[ref]) and ref not in result:
+            result.append(ref)
+
+    def non_dpi_sources() -> List[str]:
+        return [r for r, o in cfg.items() if o.get(".type") == "outbound_source"
+                and str(o.get("source_type", "")).lower() != "desync"]
+
+    def explicit() -> bool:
+        return sid in inline_sections or any(
+            str(cfg[r].get("source_type", "")).lower() != "desync" for r in result)
+
+    def add_grp(gid: str, has_explicit: bool) -> None:
+        grp = cfg.get(gid, {})
+        if grp.get(".type") != "outbound_group" or not _enabled(grp) or has_explicit:
+            return
+        srcs = _list(grp.get("source_refs"))
+        for r in (non_dpi_sources() if not srcs or srcs[0] == "*" else srcs):
+            add_src(r)
+
+    for r in _list(section.get("outbound_source_refs")):
+        add_src(r)
+    has_explicit = explicit()
+    for g in _list(section.get("outbound_group_refs")):
+        add_grp(g, has_explicit)
+    has_explicit = explicit()
+    for bid in _list(section.get("balancer_refs")):
+        bal = cfg.get(bid, {})
+        if bal.get(".type") != "balancer" or not _enabled(bal):
+            continue
+        if not has_explicit:
+            for r in _list(bal.get("source_refs")):
+                add_src(r)
+            for g in _list(bal.get("group_refs")):
+                add_grp(g, False)
+        levels = (_levels_of(_balancer_settings(section, bid)) or _levels_of(section) or _levels_of(bal))
+        for ref in levels:
+            if ref.lower() == "direct" or ref.startswith("srv:"):
+                continue
+            if is_src(ref):
+                add_src(ref)
+            elif cfg.get(ref, {}).get(".type") == "outbound_group":
+                gs = _list(cfg[ref].get("source_refs"))
+                if gs and gs[0] != "*":
+                    for r in gs:
+                        add_src(r)
+                else:
+                    add_grp(ref, has_explicit)
+    return result
+
+
 def analyze(text: str, backup: Sequence[str] = (), rename: Optional[Sequence[str]] = None) -> CheckResult:
     """``backup``: names (or substrings) that must only be a fallback tier.
     ``rename``: (old, new) — report every place the old name is used."""
@@ -155,6 +241,13 @@ def analyze(text: str, backup: Sequence[str] = (), rename: Optional[Sequence[str
                 "fake", "fake_split", "fake_disorder", "multi_disorder"):
             res.findings.append(Finding("info", sid, "fooling не задан → ядро 0.5+ использует md5"))
 
+    # ---- amnezia names (also tells which sections carry inline connections)
+    for line in parts.get("amnezia", "").splitlines():
+        cols = line.split("\t")
+        if len(cols) == 4:
+            res.amnezia_names.append({"section": cols[0], "option": cols[1], "index": cols[2], "name": cols[3]})
+    inline = [a["section"] for a in res.amnezia_names if cfg.get(a["section"], {}).get(".type") == "section"]
+
     # ---- balancers
     sections_by_bal: Dict[str, List[str]] = {}
     for sid, opts in cfg.items():
@@ -165,16 +258,34 @@ def analyze(text: str, backup: Sequence[str] = (), rename: Optional[Sequence[str
             continue
         btype = str(opts.get("balancer_type") or "urltest").lower()
         raw: List[str] = []
-        for sid in sections_by_bal.get(bid, []):   # balancers.ts: levels stored on the using section first
-            raw = _list(cfg[sid].get("outbound_group_levels"))
+        order_from = ""
+        # connections.uc: section balancer_settings[bid] → section levels → balancer levels
+        for sid in sections_by_bal.get(bid, []):
+            for where, entity in ((f"{sid}.balancer_settings", _balancer_settings(cfg[sid], bid)),
+                                  (f"{sid}.outbound_group_levels", cfg[sid])):
+                raw = _levels_of(entity)
+                if raw:
+                    order_from = where
+                    break
             if raw:
                 break
         if not raw:
-            raw = _list(opts.get("outbound_group_levels"))
-        if not raw and btype != "priority":
-            raw = _list(opts.get("group_refs")) or _list(opts.get("source_refs"))
-        view = BalancerView(bid, str(opts.get("name") or bid), btype, [_display(cfg, r) for r in raw], raw,
-                            sections_by_bal.get(bid, []), str(opts.get("mode") or ""))
+            raw = _levels_of(opts)
+            order_from = f"{bid}.outbound_group_levels" if raw else ""
+        names = [_display(cfg, r) for r in raw]
+        if not raw:
+            # no explicit levels: members follow the section's effective source order
+            for sid in sections_by_bal.get(bid, []):
+                own = [a["name"] or f"{sid}[{a['index']}]" for a in res.amnezia_names if a["section"] == sid]
+                raw = [f"inline:{n}" for n in own] + _effective_sources(cfg, sid, inline)
+                if raw:
+                    names = own + [_display(cfg, r) for r in raw[len(own):]]
+                    order_from = f"источники секции {sid} (outbound_source_refs, группы, балансировщик)"
+                    if own:
+                        order_from += "; встроенные Amnezia-конфигурации показаны первыми, их место не проверено"
+                    break
+        view = BalancerView(bid, str(opts.get("name") or bid), btype, names, raw,
+                            sections_by_bal.get(bid, []), str(opts.get("mode") or ""), order_from)
         res.balancers.append(view)
         if str(opts.get("enabled", "1")) == "0":
             res.findings.append(Finding("info", bid, "балансировщик выключен"))
@@ -197,11 +308,7 @@ def analyze(text: str, backup: Sequence[str] = (), rename: Optional[Sequence[str
                 res.findings.append(Finding("info", bid, f"OK: «{name}» — резервная (последняя) ступень "
                                             f"из {len(view.levels)}"))
 
-    # ---- amnezia names and rename impact
-    for line in parts.get("amnezia", "").splitlines():
-        cols = line.split("\t")
-        if len(cols) == 4:
-            res.amnezia_names.append({"section": cols[0], "option": cols[1], "index": cols[2], "name": cols[3]})
+    # ---- rename impact
     if rename:
         old = rename[0]
         places = [f"{a['section']}.{a['option']}[{a['index']}] (имя Amnezia-конфигурации)"
@@ -238,7 +345,8 @@ def report(res: CheckResult) -> str:
         mode = f", алгоритм `{b.mode}`" if b.mode and b.type == "urltest" else ""
         lines.append(f"* **{b.name}** (`{b.id}`), тип `{b.type}`{mode}, используется: "
                      f"{', '.join(b.used_by) or '—'}")
-        lines.append(f"  * порядок: {' → '.join(b.levels) or '(не задан)'}")
+        src = f" (из {b.order_from})" if b.order_from else ""
+        lines.append(f"  * порядок: {' → '.join(b.levels) or '(не задан)'}{src}")
     if res.amnezia_names:
         lines += ["", "## Amnezia-конфигурации (только имена)", ""]
         lines += [f"* {a['section']}.{a['option']}[{a['index']}]: «{a['name']}»" for a in res.amnezia_names]
