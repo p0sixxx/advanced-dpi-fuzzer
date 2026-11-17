@@ -5,8 +5,8 @@
 **zapret2 (nfqws2)**. Цель — найти не просто «какую-то работающую», а **самую простую стратегию,
 статистически надёжную на всех ваших ресурсах**, для конкретного провайдера и маршрута.
 
-> Статус: 0.3.1. Код, тесты и агент проверены в CI-окружении (Linux, `dash` и busybox `ash`) и
-> в реальных прогонах на GL.iNet Flint 2 (tachyon-core 0.3.4–0.4.0) — см. [ограничения](#ограничения).
+> Статус: 0.3.2. Код, тесты и агент проверены в CI-окружении (Linux, `dash` и busybox `ash`) и
+> в реальных прогонах на GL.iNet Flint 2 (tachyon-core 0.3.4–0.4.2; `caps` и `tachyon-check` — на Tachyon 1.8.0 с ядром 0.5.9) — см. [ограничения](#ограничения).
 
 ## Чем отличается от встроенного DPI Fuzzer v2 Tachyon
 
@@ -166,7 +166,7 @@ Tachyon меняет только `adf apply`, и только после под
 
 ```sh
 python packaging/build_release.py
-ssh root@192.168.8.1 "cat > /tmp/adf-router.sh" < dist/adf-router-0.3.1.sh
+ssh root@192.168.8.1 "cat > /tmp/adf-router.sh" < dist/adf-router-0.3.2.sh
 ssh -t root@192.168.8.1 sh /tmp/adf-router.sh
 ```
 
